@@ -234,6 +234,15 @@ func (d *Dataset) AddItem(item data.Item) {
 func (d *Dataset) AddFeedback(userId, itemId string, timestamp time.Time) {
 	userIndex := d.userDict.Add(userId)
 	itemIndex := d.itemDict.Add(itemId)
+	for len(d.userFeedback) <= int(userIndex) {
+		d.userFeedback = append(d.userFeedback, nil)
+	}
+	for len(d.timestamps) <= int(userIndex) {
+		d.timestamps = append(d.timestamps, nil)
+	}
+	for len(d.itemFeedback) <= int(itemIndex) {
+		d.itemFeedback = append(d.itemFeedback, nil)
+	}
 	d.userFeedback[userIndex] = append(d.userFeedback[userIndex], itemIndex)
 	d.itemFeedback[itemIndex] = append(d.itemFeedback[itemIndex], userIndex)
 	d.timestamps[userIndex] = append(d.timestamps[userIndex], timestamp)
