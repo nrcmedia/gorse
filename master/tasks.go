@@ -436,7 +436,13 @@ func (m *Master) LoadDataFromDatabase(
 	err = parallel.Parallel(newCtx, len(itemGroups), m.Config.Master.NumJobs, func(_, i int) error {
 		var itemFeedback []data.Feedback
 		var itemGroupIndex int
+		var itemGroupIndexValid bool
 		itemHasFeedback := make([]bool, len(itemGroups[i]))
+		// build item ID to chunk index map for O(1) lookup
+		itemIndexMap := make(map[string]int, len(itemGroups[i]))
+		for idx, item := range itemGroups[i] {
+			itemIndexMap[item.ItemId] = idx
+		}
 		feedbackChan, errChan := database.GetFeedbackStream(newCtx, batchSize,
 			data.WithBeginItemId(itemGroups[i][0].ItemId),
 			data.WithEndItemId(itemGroups[i][len(itemGroups[i])-1].ItemId),
@@ -469,18 +475,22 @@ func (m *Master) LoadDataFromDatabase(
 					itemFeedback = append(itemFeedback, f)
 				} else {
 					// add item to non-personalized recommenders
-					itemHasFeedback[itemGroupIndex] = true
-					for _, recommender := range nonPersonalizedRecommenders {
-						recommender.Push(itemGroups[i][itemGroupIndex], itemFeedback)
+					if itemGroupIndexValid {
+						itemHasFeedback[itemGroupIndex] = true
+						for _, recommender := range nonPersonalizedRecommenders {
+							recommender.Push(itemGroups[i][itemGroupIndex], itemFeedback)
+						}
 					}
 					itemFeedback = itemFeedback[:0]
 					itemFeedback = append(itemFeedback, f)
 				}
 				// find item group index
-				for itemGroupIndex = 0; itemGroupIndex < len(itemGroups[i]); itemGroupIndex++ {
-					if itemGroups[i][itemGroupIndex].ItemId == f.ItemId {
-						break
-					}
+				var ok bool
+				if itemGroupIndex, ok = itemIndexMap[f.ItemId]; ok {
+					itemGroupIndexValid = true
+				} else {
+					// feedback item not in this chunk (collation mismatch) — skip
+					itemGroupIndexValid = false
 				}
 				dataSet.AddFeedback(f.UserId, f.ItemId, f.Timestamp)
 			}
@@ -488,7 +498,7 @@ func (m *Master) LoadDataFromDatabase(
 		}
 
 		// add item to non-personalized recommenders
-		if len(itemFeedback) > 0 {
+		if len(itemFeedback) > 0 && itemGroupIndexValid {
 			itemHasFeedback[itemGroupIndex] = true
 			for _, recommender := range nonPersonalizedRecommenders {
 				recommender.Push(itemGroups[i][itemGroupIndex], itemFeedback)
