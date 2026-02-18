@@ -208,6 +208,63 @@ func (s *MasterTestSuite) TestUserToUser() {
 	s.Equal([]string{"7", "5", "3"}, cache.ConvertDocumentsToValues(similar))
 }
 
+func (s *MasterTestSuite) TestLoadDataMixedCaseItemIds() {
+	ctx := context.Background()
+	// Use multiple jobs to create parallel chunks. Mixed-case item IDs sort
+	// differently under Go's bytewise comparison ("A"<"Z"<"a"<"z") vs typical
+	// DB case-insensitive collation. This exercises the map-based chunk lookup
+	// and verifies no panic from chunk boundary mismatches.
+	s.Config = &config.Config{}
+	s.Config.Recommend.CacheSize = 3
+	s.Config.Recommend.DataSource.PositiveFeedbackTypes = []expression.FeedbackTypeExpression{
+		expression.MustParseFeedbackTypeExpression("positive")}
+	s.Config.Master.NumJobs = 4
+
+	// Insert items with mixed-case IDs that create interesting chunk boundaries
+	// under bytewise sort: "Alpha" < "Beta" < "Zeta" < "alpha" < "beta" < "zeta"
+	itemIDs := []string{"Alpha", "Beta", "Zeta", "alpha", "beta", "zeta"}
+	var items []data.Item
+	for _, id := range itemIDs {
+		items = append(items, data.Item{
+			ItemId:    id,
+			Timestamp: time.Now(),
+		})
+	}
+	err := s.DataClient.BatchInsertItems(ctx, items)
+	s.NoError(err)
+
+	// Insert users
+	var users []data.User
+	for i := 0; i < 3; i++ {
+		users = append(users, data.User{UserId: strconv.Itoa(i)})
+	}
+	err = s.DataClient.BatchInsertUsers(ctx, users)
+	s.NoError(err)
+
+	// Insert feedback across all items
+	var feedbacks []data.Feedback
+	for _, itemID := range itemIDs {
+		for i := 0; i < 3; i++ {
+			feedbacks = append(feedbacks, data.Feedback{
+				FeedbackKey: data.FeedbackKey{
+					ItemId:       itemID,
+					UserId:       strconv.Itoa(i),
+					FeedbackType: "positive",
+				},
+				Timestamp: time.Now(),
+			})
+		}
+	}
+	err = s.DataClient.BatchInsertFeedback(ctx, feedbacks, false, false, true)
+	s.NoError(err)
+
+	// Load dataset — should complete without panic
+	datasets, err := s.loadDataset(ctx)
+	s.NoError(err)
+	s.Equal(3, datasets.rankingTrainSet.CountUsers())
+	s.Equal(6, datasets.rankingTrainSet.CountItems())
+}
+
 func (s *MasterTestSuite) TestLoadDataFromDatabase() {
 	ctx := context.Background()
 	// create config

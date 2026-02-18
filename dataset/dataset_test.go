@@ -174,6 +174,19 @@ func TestDataset_AddFeedback(t *testing.T) {
 	}
 }
 
+func TestDataset_AddFeedback_GrowsSlices(t *testing.T) {
+	// AddFeedback should grow internal slices when encountering user/item IDs
+	// that weren't previously registered via AddUser/AddItem.
+	dataSet := NewDataset(time.Now(), 0, 0)
+	assert.NotPanics(t, func() {
+		dataSet.AddFeedback("user0", "item0", time.Now())
+		dataSet.AddFeedback("user1", "item1", time.Now())
+	})
+	assert.Equal(t, 2, dataSet.CountFeedback())
+	assert.Len(t, dataSet.GetUserFeedback(), 2)
+	assert.Len(t, dataSet.GetItemFeedback(), 2)
+}
+
 func TestDataset_Split(t *testing.T) {
 	const numUsers, numItems = 3, 5
 	// create dataset
