@@ -57,6 +57,7 @@ func main() {
 	flags.Int("jobs", runtime.NumCPU(), "parallel workers for model fitting")
 	flags.Int("patience", 10, "early stopping patience")
 	flags.String("output", "./optimize-results.sqlite3", "path for output SQLite database")
+	flags.Float64("split-ratio", 0.2, "fraction of CTR data used for testing (0.0-1.0)")
 	flags.Bool("quiet", false, "suppress log output")
 	lo.Must0(rootCmd.MarkFlagRequired("config"))
 
@@ -81,6 +82,7 @@ func run(cmd *cobra.Command, args []string) {
 	jobs, _ := cmd.Flags().GetInt("jobs")
 	patience, _ := cmd.Flags().GetInt("patience")
 	outputPath, _ := cmd.Flags().GetString("output")
+	splitRatio, _ := cmd.Flags().GetFloat64("split-ratio")
 
 	// Load configuration
 	cfg, err := config.LoadConfig(configPath)
@@ -145,7 +147,7 @@ func run(cmd *cobra.Command, args []string) {
 	log.Logger().Info("optimizing click-through rate model",
 		zap.Int("trials", trials), zap.Int("jobs", jobs), zap.Int("patience", patience))
 
-	ctrTrainSet, ctrTestSet := ctrDataset.Split(0.2, 0)
+	ctrTrainSet, ctrTestSet := ctrDataset.Split(float32(splitRatio), 0)
 	ctrResult, ctrDuration, err := optimizeCTR(ctrTrainSet, ctrTestSet, trials, jobs, patience)
 	if err != nil {
 		log.Logger().Fatal("failed to optimize CTR model", zap.Error(err))

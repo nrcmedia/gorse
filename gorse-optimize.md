@@ -19,6 +19,7 @@ go build ./cmd/gorse-optimize
 | `--jobs` | NumCPU | Parallel workers for model fitting |
 | `--patience` | 10 | Early stopping patience |
 | `--output` | `./optimize-results.sqlite3` | Path for output SQLite database |
+| `--split-ratio` | 0.2 | Fraction of CTR data used for testing (0.0-1.0) |
 | `--quiet` | false | Suppress log output |
 | `--log-path` | | Path to log file |
 
@@ -27,7 +28,7 @@ go build ./cmd/gorse-optimize
 1. Loads the full dataset from the database configured in the TOML config
 2. Splits the data:
    - Collaborative filtering: leave-one-out split
-   - Click-through rate: 80/20 random split
+   - Click-through rate: random split (default 80/20, configurable via `--split-ratio`)
 3. Runs goptuna TPE optimization:
    - **MF**: searches over BPR and ALS models
    - **FM**: searches over AFM model
