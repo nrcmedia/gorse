@@ -46,6 +46,8 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+const metaTimeout = 10 * time.Second
+
 func main() {
 	rootCmd := &cobra.Command{
 		Use:   "gorse-optimize",
@@ -200,7 +202,7 @@ func runList(cmd *cobra.Command, args []string) {
 
 	printCurrentMeta(cacheDir)
 
-	db, err := openOutputDB(outputPath)
+	db, err := openOutputDBReadOnly(outputPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error opening results database: %v\n", err)
 		os.Exit(1)
@@ -242,6 +244,10 @@ func runList(cmd *cobra.Command, args []string) {
 			fmt.Sprintf("%d", id), modelType, bestType, score, params, duration, createdAt,
 		}))
 	}
+	if err := rows.Err(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error iterating runs: %v\n", err)
+		os.Exit(1)
+	}
 	if !hasRows {
 		fmt.Println("  (no runs found)")
 	} else {
@@ -251,14 +257,9 @@ func runList(cmd *cobra.Command, args []string) {
 
 func printCurrentMeta(cacheDir string) {
 	metaPath := filepath.Join(cacheDir, "meta.sqlite3")
-	if _, err := os.Stat(metaPath); os.IsNotExist(err) {
-		fmt.Printf("Meta store not found at %s (use --cache-dir to specify)\n\n", metaPath)
-		return
-	}
-
-	metaStore, err := meta.Open(fmt.Sprintf("sqlite://%s", metaPath), 10*time.Second)
+	metaStore, err := meta.Open(fmt.Sprintf("sqlite://%s", metaPath), metaTimeout)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: could not open meta store: %v\n\n", err)
+		fmt.Printf("Could not open meta store at %s (use --cache-dir to specify)\n\n", metaPath)
 		return
 	}
 	defer metaStore.Close()
@@ -332,7 +333,7 @@ func runApply(cmd *cobra.Command, args []string) {
 	cacheDir, _ := cmd.Flags().GetString("cache-dir")
 	runID, _ := cmd.Flags().GetInt("run-id")
 
-	db, err := openOutputDB(outputPath)
+	db, err := openOutputDBReadOnly(outputPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error opening results database: %v\n", err)
 		os.Exit(1)
@@ -340,7 +341,7 @@ func runApply(cmd *cobra.Command, args []string) {
 	defer db.Close()
 
 	metaPath := filepath.Join(cacheDir, "meta.sqlite3")
-	metaStore, err := meta.Open(fmt.Sprintf("sqlite://%s", metaPath), 10*time.Second)
+	metaStore, err := meta.Open(fmt.Sprintf("sqlite://%s", metaPath), metaTimeout)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error opening meta store at %s: %v\n", metaPath, err)
 		os.Exit(1)
@@ -397,7 +398,8 @@ func applyLatest(db *sql.DB, metaStore meta.Database, modelType, metaKey string)
 }
 
 func applyToMeta(metaStore meta.Database, metaKey, modelType, bestType, paramsJSON, scoreJSON string) {
-	// Build the meta model JSON — we need to construct the full Model[T] structure
+	// Build meta JSON manually because we're type-erased here (params/score are raw JSON
+	// from the results DB) and can't instantiate a typed meta.Model[T] without knowing T.
 	metaJSON, err := json.Marshal(map[string]interface{}{
 		"ID":     time.Now().Unix(),
 		"Type":   bestType,
@@ -529,6 +531,13 @@ func openOutputDB(path string) (*sql.DB, error) {
 		return nil, err
 	}
 	return db, nil
+}
+
+func openOutputDBReadOnly(path string) (*sql.DB, error) {
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return nil, fmt.Errorf("results database not found at %s", path)
+	}
+	return sql.Open("sqlite", path+"?_pragma=journal_mode(wal)&_pragma=busy_timeout(10000)")
 }
 
 func saveRun(db *sql.DB, modelType, bestType string, params interface{}, score interface{}, trials int, duration time.Duration) error {
