@@ -56,6 +56,24 @@ SELECT * FROM runs;
 | `duration_seconds` | Wall time for optimization |
 | `created_at` | Timestamp |
 
+## Tuning tips
+
+The CTR (AFM) model dominates runtime. These are the main levers for speed vs. effectiveness:
+
+| Setting | Default | Recommendation | Impact |
+|---------|---------|----------------|--------|
+| `--patience` | 10 | 5 | AFM scores plateau early; patience 5 catches it faster, saving many epochs per trial. Biggest win. |
+| `--split-ratio` | 0.2 | 0.1 | Smaller test set means faster evaluation per epoch. Minor accuracy trade-off. |
+| `--trials` | 20 | 8-12 | Each CTR trial takes 25-50 min. Fewer trials = proportionally faster. |
+| `fit_epoch` (config) | 100 (BPR), 50 (ALS/AFM) | Keep defaults | Early stopping usually kicks in well before the epoch limit. |
+| `optimize_trials` (config) | 20 (CF), 12 (CTR) | Overridden by `--trials` | CLI flag takes precedence. |
+
+Example fast run:
+
+```bash
+./gorse-optimize --config config.toml --trials 8 --patience 5 --split-ratio 0.1
+```
+
 ## Examples
 
 Quick test with 2 trials:
