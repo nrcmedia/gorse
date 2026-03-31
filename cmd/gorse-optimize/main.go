@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/signal"
 	"runtime"
 	"sort"
 	"strings"
@@ -73,9 +74,11 @@ func run(cmd *cobra.Command, args []string) {
 	if quiet {
 		log.CloseLogger()
 	} else {
-		// Use console encoder for human-readable output
 		log.SetLogger(cmd.Flags(), true)
 	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
 
 	configPath, _ := cmd.Flags().GetString("config")
 	trials, _ := cmd.Flags().GetInt("trials")
@@ -84,14 +87,12 @@ func run(cmd *cobra.Command, args []string) {
 	outputPath, _ := cmd.Flags().GetString("output")
 	splitRatio, _ := cmd.Flags().GetFloat64("split-ratio")
 
-	// Load configuration
 	cfg, err := config.LoadConfig(configPath)
 	if err != nil {
 		log.Logger().Fatal("failed to load config", zap.Error(err))
 	}
 
-	// Load dataset
-	log.Logger().Info("loading data from database...")
+	log.Logger().Info("loading data from database")
 	m := master.NewMaster(cfg, os.TempDir(), false, configPath)
 	m.DataClient, err = data.Open(m.Config.Database.DataStore, m.Config.Database.DataTablePrefix,
 		storage.WithIsolationLevel(m.Config.Database.MySQL.IsolationLevel))
@@ -101,7 +102,7 @@ func run(cmd *cobra.Command, args []string) {
 	evaluator := master.NewOnlineEvaluator(
 		m.Config.Recommend.DataSource.PositiveFeedbackTypes,
 		m.Config.Recommend.DataSource.ReadFeedbackTypes)
-	ctrDataset, cfDataset, err := m.LoadDataFromDatabase(context.Background(), m.DataClient,
+	ctrDataset, cfDataset, err := m.LoadDataFromDatabase(ctx, m.DataClient,
 		m.Config.Recommend.DataSource.PositiveFeedbackTypes,
 		m.Config.Recommend.DataSource.ReadFeedbackTypes,
 		m.Config.Recommend.DataSource.ItemTTL,
@@ -117,19 +118,17 @@ func run(cmd *cobra.Command, args []string) {
 		zap.Int("items", cfDataset.CountItems()),
 		zap.Int("feedback", cfDataset.CountFeedback()))
 
-	// Open output SQLite
 	db, err := openOutputDB(outputPath)
 	if err != nil {
 		log.Logger().Fatal("failed to open output database", zap.Error(err))
 	}
 	defer db.Close()
 
-	// Optimize collaborative filtering
 	log.Logger().Info("optimizing collaborative filtering model",
 		zap.Int("trials", trials), zap.Int("jobs", jobs), zap.Int("patience", patience))
 
 	cfTrainSet, cfTestSet := cfDataset.SplitCF(0, 0)
-	cfResult, cfDuration, err := optimizeCF(cfTrainSet, cfTestSet, trials, jobs, patience)
+	cfResult, cfDuration, err := optimizeCF(ctx, cfTrainSet, cfTestSet, trials, jobs, patience)
 	if err != nil {
 		log.Logger().Fatal("failed to optimize CF model", zap.Error(err))
 	}
@@ -143,12 +142,11 @@ func run(cmd *cobra.Command, args []string) {
 		log.Logger().Fatal("failed to save CF result", zap.Error(err))
 	}
 
-	// Optimize click-through rate prediction
 	log.Logger().Info("optimizing click-through rate model",
 		zap.Int("trials", trials), zap.Int("jobs", jobs), zap.Int("patience", patience))
 
 	ctrTrainSet, ctrTestSet := ctrDataset.Split(float32(splitRatio), 0)
-	ctrResult, ctrDuration, err := optimizeCTR(ctrTrainSet, ctrTestSet, trials, jobs, patience)
+	ctrResult, ctrDuration, err := optimizeCTR(ctx, ctrTrainSet, ctrTestSet, trials, jobs, patience)
 	if err != nil {
 		log.Logger().Fatal("failed to optimize CTR model", zap.Error(err))
 	}
@@ -162,13 +160,12 @@ func run(cmd *cobra.Command, args []string) {
 		log.Logger().Fatal("failed to save CTR result", zap.Error(err))
 	}
 
-	// Print results table
 	fmt.Println()
 	printResults(cfResult, cfDuration, ctrResult, ctrDuration)
 	fmt.Printf("\nResults saved to %s\n", outputPath)
 }
 
-func optimizeCF(trainSet, testSet dataset.CFSplit, trials, jobs, patience int) (meta.Model[cf.Score], time.Duration, error) {
+func optimizeCF(ctx context.Context, trainSet, testSet dataset.CFSplit, trials, jobs, patience int) (meta.Model[cf.Score], time.Duration, error) {
 	if trainSet.CountUsers() == 0 || trainSet.CountItems() == 0 || trainSet.CountFeedback() == 0 {
 		return meta.Model[cf.Score]{}, 0, fmt.Errorf("insufficient data: %d users, %d items, %d feedback",
 			trainSet.CountUsers(), trainSet.CountItems(), trainSet.CountFeedback())
@@ -179,20 +176,20 @@ func optimizeCF(trainSet, testSet dataset.CFSplit, trials, jobs, patience int) (
 		"ALS": func() cf.MatrixFactorization { return cf.NewALS(nil) },
 	}, trainSet, testSet,
 		cf.NewFitConfig().SetJobs(jobs).SetPatience(patience)).
-		WithContext(context.Background())
+		WithContext(ctx)
 
-	trialNum := 0
 	objective := func(trial goptuna.Trial) (float64, error) {
-		trialNum++
-		log.Logger().Info(fmt.Sprintf("CF trial %d/%d starting", trialNum, trials))
+		num, _ := trial.Number()
+		log.Logger().Info("CF trial starting", zap.Int("trial", num+1), zap.Int("total", trials))
 		start := time.Now()
 		score, err := search.Objective(trial)
 		if err != nil {
-			log.Logger().Error(fmt.Sprintf("CF trial %d/%d failed", trialNum, trials), zap.Error(err))
+			log.Logger().Error("CF trial failed", zap.Int("trial", num+1), zap.Error(err))
 			return score, err
 		}
 		result := search.Result()
-		log.Logger().Info(fmt.Sprintf("CF trial %d/%d completed", trialNum, trials),
+		log.Logger().Info("CF trial completed",
+			zap.Int("trial", num+1),
 			zap.Float64("ndcg", score),
 			zap.String("best_so_far", fmt.Sprintf("%s (NDCG=%.4f)", result.Type, result.Score.NDCG)),
 			zap.String("duration", formatDuration(time.Since(start))))
@@ -200,20 +197,13 @@ func optimizeCF(trainSet, testSet dataset.CFSplit, trials, jobs, patience int) (
 	}
 
 	start := time.Now()
-	study, err := goptuna.CreateStudy("optimizeCollaborativeFiltering",
-		goptuna.StudyOptionDirection(goptuna.StudyDirectionMaximize),
-		goptuna.StudyOptionSampler(tpe.NewSampler()),
-		goptuna.StudyOptionLogger(newQuietOptunaLogger()))
-	if err != nil {
-		return meta.Model[cf.Score]{}, 0, err
-	}
-	if err = study.Optimize(objective, trials); err != nil {
+	if err := runStudy("optimizeCollaborativeFiltering", objective, trials); err != nil {
 		return meta.Model[cf.Score]{}, 0, err
 	}
 	return search.Result(), time.Since(start), nil
 }
 
-func optimizeCTR(trainSet, testSet *ctr.Dataset, trials, jobs, patience int) (meta.Model[ctr.Score], time.Duration, error) {
+func optimizeCTR(ctx context.Context, trainSet, testSet *ctr.Dataset, trials, jobs, patience int) (meta.Model[ctr.Score], time.Duration, error) {
 	if trainSet.CountUsers() == 0 || trainSet.CountItems() == 0 || trainSet.Count() == 0 {
 		return meta.Model[ctr.Score]{}, 0, fmt.Errorf("insufficient data: %d users, %d items, %d interactions",
 			trainSet.CountUsers(), trainSet.CountItems(), trainSet.Count())
@@ -223,20 +213,20 @@ func optimizeCTR(trainSet, testSet *ctr.Dataset, trials, jobs, patience int) (me
 		"FM": func() ctr.FactorizationMachines { return ctr.NewAFM(nil) },
 	}, trainSet, testSet,
 		ctr.NewFitConfig().SetJobs(jobs).SetPatience(patience)).
-		WithContext(context.Background())
+		WithContext(ctx)
 
-	trialNum := 0
 	objective := func(trial goptuna.Trial) (float64, error) {
-		trialNum++
-		log.Logger().Info(fmt.Sprintf("CTR trial %d/%d starting", trialNum, trials))
+		num, _ := trial.Number()
+		log.Logger().Info("CTR trial starting", zap.Int("trial", num+1), zap.Int("total", trials))
 		start := time.Now()
 		score, err := search.Objective(trial)
 		if err != nil {
-			log.Logger().Error(fmt.Sprintf("CTR trial %d/%d failed", trialNum, trials), zap.Error(err))
+			log.Logger().Error("CTR trial failed", zap.Int("trial", num+1), zap.Error(err))
 			return score, err
 		}
 		result := search.Result()
-		log.Logger().Info(fmt.Sprintf("CTR trial %d/%d completed", trialNum, trials),
+		log.Logger().Info("CTR trial completed",
+			zap.Int("trial", num+1),
 			zap.Float64("auc", score),
 			zap.String("best_so_far", fmt.Sprintf("%s (AUC=%.4f)", result.Type, result.Score.AUC)),
 			zap.String("duration", formatDuration(time.Since(start))))
@@ -244,31 +234,25 @@ func optimizeCTR(trainSet, testSet *ctr.Dataset, trials, jobs, patience int) (me
 	}
 
 	start := time.Now()
-	study, err := goptuna.CreateStudy("optimizeClickThroughRatePrediction",
-		goptuna.StudyOptionDirection(goptuna.StudyDirectionMaximize),
-		goptuna.StudyOptionSampler(tpe.NewSampler()),
-		goptuna.StudyOptionLogger(newQuietOptunaLogger()))
-	if err != nil {
-		return meta.Model[ctr.Score]{}, 0, err
-	}
-	if err = study.Optimize(objective, trials); err != nil {
+	if err := runStudy("optimizeClickThroughRatePrediction", objective, trials); err != nil {
 		return meta.Model[ctr.Score]{}, 0, err
 	}
 	return search.Result(), time.Since(start), nil
 }
 
-// quietOptunaLogger suppresses goptuna's own trial logging since we handle it ourselves.
-type quietOptunaLogger struct{}
-
-func newQuietOptunaLogger() goptuna.Logger { return &quietOptunaLogger{} }
-
-func (q *quietOptunaLogger) Debug(string, ...interface{}) {}
-func (q *quietOptunaLogger) Info(string, ...interface{})  {}
-func (q *quietOptunaLogger) Warn(string, ...interface{})  {}
-func (q *quietOptunaLogger) Error(string, ...interface{}) {}
+func runStudy(name string, objective goptuna.FuncObjective, trials int) error {
+	study, err := goptuna.CreateStudy(name,
+		goptuna.StudyOptionDirection(goptuna.StudyDirectionMaximize),
+		goptuna.StudyOptionSampler(tpe.NewSampler()),
+		goptuna.StudyOptionLogger(log.NewOptunaLogger(log.Logger())))
+	if err != nil {
+		return err
+	}
+	return study.Optimize(objective, trials)
+}
 
 func openOutputDB(path string) (*sql.DB, error) {
-	db, err := sql.Open("sqlite", path)
+	db, err := sql.Open("sqlite", path+"?_pragma=journal_mode(wal)&_pragma=busy_timeout(10000)")
 	if err != nil {
 		return nil, err
 	}
@@ -363,4 +347,3 @@ func formatDuration(d time.Duration) string {
 	}
 	return fmt.Sprintf("%dm%ds", int(d.Minutes()), int(d.Seconds())%60)
 }
-
