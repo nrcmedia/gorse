@@ -176,7 +176,8 @@ func optimizeCF(trainSet, testSet dataset.CFSplit, trials, jobs, patience int) (
 		"BPR": func() cf.MatrixFactorization { return cf.NewBPR(nil) },
 		"ALS": func() cf.MatrixFactorization { return cf.NewALS(nil) },
 	}, trainSet, testSet,
-		cf.NewFitConfig().SetJobs(jobs).SetPatience(patience))
+		cf.NewFitConfig().SetJobs(jobs).SetPatience(patience)).
+		WithContext(context.Background())
 
 	trialNum := 0
 	objective := func(trial goptuna.Trial) (float64, error) {
@@ -219,7 +220,8 @@ func optimizeCTR(trainSet, testSet *ctr.Dataset, trials, jobs, patience int) (me
 	search := ctr.NewModelSearch(map[string]ctr.ModelCreator{
 		"FM": func() ctr.FactorizationMachines { return ctr.NewAFM(nil) },
 	}, trainSet, testSet,
-		ctr.NewFitConfig().SetJobs(jobs).SetPatience(patience))
+		ctr.NewFitConfig().SetJobs(jobs).SetPatience(patience)).
+		WithContext(context.Background())
 
 	trialNum := 0
 	objective := func(trial goptuna.Trial) (float64, error) {
