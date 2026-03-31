@@ -15,7 +15,7 @@ go build ./cmd/gorse-optimize
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--config` | (required) | Path to gorse TOML config |
-| `--trials` | 20 | Number of goptuna trials per model |
+| `--trials` | 10 | Number of goptuna trials per model |
 | `--jobs` | NumCPU | Parallel workers for model fitting |
 | `--patience` | 10 | Early stopping patience |
 | `--output` | `./optimize-results.sqlite3` | Path for output SQLite database |
@@ -64,9 +64,9 @@ The CTR (AFM) model dominates runtime. These are the main levers for speed vs. e
 |---------|---------|----------------|--------|
 | `--patience` | 10 | 5 | AFM scores plateau early; patience 5 catches it faster, saving many epochs per trial. Biggest win. |
 | `--split-ratio` | 0.2 | 0.1 | Smaller test set means faster evaluation per epoch. Minor accuracy trade-off. |
-| `--trials` | 20 | 8-12 | Each CTR trial takes 25-50 min. Fewer trials = proportionally faster. |
+| `--trials` | 10 | 8-12 | Each CTR trial takes 25-50 min. Fewer trials = proportionally faster. |
 | `fit_epoch` (config) | 100 (BPR), 50 (ALS/AFM) | Keep defaults | Early stopping usually kicks in well before the epoch limit. |
-| `optimize_trials` (config) | 20 (CF), 12 (CTR) | Overridden by `--trials` | CLI flag takes precedence. |
+| `optimize_trials` (config) | 10 | Overridden by `--trials` | CLI flag takes precedence. |
 
 Example fast run:
 

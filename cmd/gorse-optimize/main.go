@@ -53,7 +53,7 @@ func main() {
 
 	flags := rootCmd.Flags()
 	flags.String("config", "", "path to gorse TOML config (required)")
-	flags.Int("trials", 20, "number of goptuna trials per model")
+	flags.Int("trials", 10, "number of goptuna trials per model")
 	flags.Int("jobs", runtime.NumCPU(), "parallel workers for model fitting")
 	flags.Int("patience", 10, "early stopping patience")
 	flags.String("output", "./optimize-results.sqlite3", "path for output SQLite database")
