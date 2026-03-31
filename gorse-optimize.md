@@ -7,10 +7,16 @@ Standalone binary for on-demand hyperparameter optimization of Gorse recommendat
 ```bash
 go build ./cmd/gorse-optimize
 
-./gorse-optimize --config /path/to/config.toml
+./gorse-optimize run --config /path/to/config.toml
+./gorse-optimize list --cache-dir /path/to/gorse/cache
+./gorse-optimize apply --cache-dir /path/to/gorse/cache
 ```
 
-## Flags
+## Subcommands
+
+### `run` — Run optimization
+
+Loads data, runs goptuna TPE optimization for CF (BPR/ALS) and CTR (AFM) models, saves results to SQLite.
 
 | Flag | Default | Description |
 |------|---------|-------------|
@@ -18,33 +24,38 @@ go build ./cmd/gorse-optimize
 | `--trials` | 10 | Number of goptuna trials per model |
 | `--jobs` | NumCPU | Parallel workers for model fitting |
 | `--patience` | 10 | Early stopping patience |
-| `--output` | `./optimize-results.sqlite3` | Path for output SQLite database |
 | `--split-ratio` | 0.2 | Fraction of CTR data used for testing (0.0-1.0) |
 | `--quiet` | false | Suppress log output |
 | `--log-path` | | Path to log file |
 
-## What it does
-
-1. Loads the full dataset from the database configured in the TOML config
-2. Splits the data:
-   - Collaborative filtering: leave-one-out split
-   - Click-through rate: random split (default 80/20, configurable via `--split-ratio`)
-3. Runs goptuna TPE optimization:
-   - **MF**: searches over BPR and ALS models
-   - **FM**: searches over AFM model
-4. Logs progress per trial (trial number, score, best-so-far, duration)
-5. Saves results to a local SQLite database
-6. Prints a human-readable summary table to stdout
-
 Logging is on by default with console-formatted output. Use `--quiet` to suppress.
+
+### `list` — List runs and current meta store values
+
+Shows the current model parameters in the gorse meta store (with timestamps), followed by a reverse-chronological list of optimization runs.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--limit` | 20 | Max number of runs to show |
+
+### `apply` — Apply results to the gorse meta store
+
+Writes optimization results into the gorse meta store (`meta.sqlite3`), making them the active parameters for the next model fit.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--run-id` | 0 | Specific run ID to apply (default: latest of each model type) |
+
+## Global flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--output` | `./optimize-results.sqlite3` | Path for results SQLite database |
+| `--cache-dir` | `os.TempDir()` | Gorse cache directory containing `meta.sqlite3` |
 
 ## Output
 
 Results are stored in the `runs` table:
-
-```sql
-SELECT * FROM runs;
-```
 
 | Column | Description |
 |--------|-------------|
@@ -68,28 +79,34 @@ The CTR (AFM) model dominates runtime. These are the main levers for speed vs. e
 | `fit_epoch` (config) | 100 (BPR), 50 (ALS/AFM) | Keep defaults | Early stopping usually kicks in well before the epoch limit. |
 | `optimize_trials` (config) | 10 | Overridden by `--trials` | CLI flag takes precedence. |
 
-Example fast run:
-
-```bash
-./gorse-optimize --config config.toml --trials 8 --patience 5 --split-ratio 0.1
-```
-
 ## Examples
 
 Quick test with 2 trials:
 
 ```bash
-./gorse-optimize --config config/config.toml --trials 2
+./gorse-optimize run --config config.toml --trials 2
 ```
 
-Full run with custom output path, quiet mode:
+Fast run with tuned settings:
 
 ```bash
-./gorse-optimize --config config/config.toml --trials 50 --patience 15 --output /data/optimize-2026-03-31.sqlite3 --quiet
+./gorse-optimize run --config config.toml --trials 8 --patience 5 --split-ratio 0.1
 ```
 
-Inspect results:
+List runs and current meta store values:
 
 ```bash
-sqlite3 optimize-results.sqlite3 "SELECT model_type, best_type, score, duration_seconds FROM runs ORDER BY created_at DESC"
+./gorse-optimize list --cache-dir ~/dev/nrc/gorse-local/var-lib-gorse
+```
+
+Apply latest optimization results:
+
+```bash
+./gorse-optimize apply --cache-dir ~/dev/nrc/gorse-local/var-lib-gorse
+```
+
+Apply a specific run by ID:
+
+```bash
+./gorse-optimize apply --cache-dir ~/dev/nrc/gorse-local/var-lib-gorse --run-id 3
 ```
