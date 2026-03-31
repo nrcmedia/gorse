@@ -8,8 +8,8 @@ Standalone binary for on-demand hyperparameter optimization of Gorse recommendat
 go build ./cmd/gorse-optimize
 
 ./gorse-optimize run --config /path/to/config.toml
-./gorse-optimize list --cache-dir /path/to/gorse/cache
-./gorse-optimize apply --cache-dir /path/to/gorse/cache
+./gorse-optimize list --cache-path /path/to/gorse/cache
+./gorse-optimize apply --cache-path /path/to/gorse/cache
 ```
 
 ## Subcommands
@@ -51,7 +51,7 @@ Writes optimization results into the gorse meta store (`meta.sqlite3`), making t
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--output` | `./optimize-results.sqlite3` | Path for results SQLite database |
-| `--cache-dir` | `os.TempDir()` | Gorse cache directory containing `meta.sqlite3` |
+| `--cache-path` | `~/.gorse/var/lib/master` | Gorse cache directory containing `meta.sqlite3` |
 
 ## Output
 
@@ -96,17 +96,17 @@ Fast run with tuned settings:
 List runs and current meta store values:
 
 ```bash
-./gorse-optimize list --cache-dir ~/dev/nrc/gorse-local/var-lib-gorse
+./gorse-optimize list --cache-path ~/dev/nrc/gorse-local/var-lib-gorse
 ```
 
 Apply latest optimization results:
 
 ```bash
-./gorse-optimize apply --cache-dir ~/dev/nrc/gorse-local/var-lib-gorse
+./gorse-optimize apply --cache-path ~/dev/nrc/gorse-local/var-lib-gorse
 ```
 
 Apply a specific run by ID:
 
 ```bash
-./gorse-optimize apply --cache-dir ~/dev/nrc/gorse-local/var-lib-gorse --run-id 3
+./gorse-optimize apply --cache-path ~/dev/nrc/gorse-local/var-lib-gorse --run-id 3
 ```

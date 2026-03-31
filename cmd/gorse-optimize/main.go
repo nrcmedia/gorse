@@ -56,7 +56,7 @@ func main() {
 
 	pflags := rootCmd.PersistentFlags()
 	pflags.String("output", "./optimize-results.sqlite3", "path for results SQLite database")
-	pflags.String("cache-dir", os.TempDir(), "gorse cache directory containing meta.sqlite3")
+	pflags.String("cache-path", config.MkDir("master"), "path of cache folder containing meta.sqlite3")
 
 	rootCmd.AddCommand(newRunCmd())
 	rootCmd.AddCommand(newListCmd())
@@ -197,7 +197,7 @@ func newListCmd() *cobra.Command {
 
 func runList(cmd *cobra.Command, args []string) {
 	outputPath, _ := cmd.Flags().GetString("output")
-	cacheDir, _ := cmd.Flags().GetString("cache-dir")
+	cacheDir, _ := cmd.Flags().GetString("cache-path")
 	limit, _ := cmd.Flags().GetInt("limit")
 
 	printCurrentMeta(cacheDir)
@@ -330,7 +330,7 @@ func newApplyCmd() *cobra.Command {
 
 func runApply(cmd *cobra.Command, args []string) {
 	outputPath, _ := cmd.Flags().GetString("output")
-	cacheDir, _ := cmd.Flags().GetString("cache-dir")
+	cacheDir, _ := cmd.Flags().GetString("cache-path")
 	runID, _ := cmd.Flags().GetInt("run-id")
 
 	db, err := openOutputDBReadOnly(outputPath)
