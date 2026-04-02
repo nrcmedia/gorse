@@ -47,10 +47,29 @@ type Pipeline struct {
 	MatrixFactorizationUsers *logics.MatrixFactorizationUsers
 	ClickThroughRateModel    ctr.FactorizationMachines
 	dontskipColdStartUsers   bool
+	recommendTimes           sync.Map // userId (string) → recommendTime (time.Time)
+	lastDigest               string
 }
 
 func (p *Pipeline) Recommend(ctx context.Context, users []data.User, progress func(completed, throughput int)) {
 	startRecommendTime := time.Now()
+	// Update digest and evict stale entries from the in-memory freshness cache.
+	currentDigest := p.Config.Recommend.Hash()
+	if p.lastDigest != currentDigest {
+		p.recommendTimes.Range(func(key, _ any) bool {
+			p.recommendTimes.Delete(key)
+			return true
+		})
+		p.lastDigest = currentDigest
+	} else {
+		freshnessTTL := min(p.Config.Recommend.CacheExpire, p.Config.Recommend.Ranker.CacheExpire)
+		p.recommendTimes.Range(func(key, value any) bool {
+			if time.Since(value.(time.Time)) >= freshnessTTL {
+				p.recommendTimes.Delete(key)
+			}
+			return true
+		})
+	}
 	itemCache := NewItemCache(p.DataClient)
 	log.Logger().Info("ranking recommendation",
 		zap.Int("n_working_users", len(users)),
@@ -232,6 +251,7 @@ func (p *Pipeline) Recommend(ctx context.Context, users []data.User, progress fu
 		); err != nil {
 			log.Logger().Error("failed to cache recommendation time", zap.Error(err))
 		}
+		p.recommendTimes.Store(userId, recommendTime)
 	}); err != nil {
 		log.Logger().Error("recommendation was cancelled", zap.Error(err))
 	}
@@ -275,6 +295,21 @@ func (p *Pipeline) checkUserActiveTime(ctx context.Context, userId string) bool 
 
 // checkRecommendCacheOutOfDate checks if recommend cache stale.
 func (p *Pipeline) checkRecommendCacheOutOfDate(ctx context.Context, userId string) bool {
+	// Fast path: if we have an in-memory recommend time within the cache TTL,
+	// skip the expensive SearchScores + digest checks. We still check user
+	// activity so that active users get re-recommended promptly.
+	if rt, ok := p.recommendTimes.Load(userId); ok {
+		recommendTime := rt.(time.Time)
+		freshnessTTL := min(p.Config.Recommend.CacheExpire, p.Config.Recommend.Ranker.CacheExpire)
+		if time.Since(recommendTime) < freshnessTTL {
+			activeTime, err := p.CacheClient.Get(ctx, cache.Key(cache.LastModifyUserTime, userId)).Time()
+			if err == nil && activeTime.After(recommendTime) {
+				return true
+			}
+			return false
+		}
+	}
+
 	var (
 		activeTime    time.Time
 		recommendTime time.Time
@@ -282,7 +317,7 @@ func (p *Pipeline) checkRecommendCacheOutOfDate(ctx context.Context, userId stri
 	)
 
 	// 1. If cache is empty, stale.
-	items, err := p.CacheClient.SearchScores(ctx, cache.Recommend, userId, nil, 0, -1)
+	items, err := p.CacheClient.SearchScores(ctx, cache.Recommend, userId, nil, 0, 1)
 	if err != nil {
 		log.Logger().Error("failed to load offline recommendation", zap.String("user_id", userId), zap.Error(err))
 		return true
@@ -299,7 +334,11 @@ func (p *Pipeline) checkRecommendCacheOutOfDate(ctx context.Context, userId stri
 	if digest == "" {
 		return true
 	}
-	if digest != p.Config.Recommend.Hash() {
+	currentDigest := p.lastDigest
+	if currentDigest == "" {
+		currentDigest = p.Config.Recommend.Hash()
+	}
+	if digest != currentDigest {
 		return true
 	}
 
