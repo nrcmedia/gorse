@@ -123,28 +123,53 @@ func (suite *WorkerTestSuite) TestPullUsers() {
 func (suite *WorkerTestSuite) TestCheckRecommendCacheTimeout() {
 	ctx := context.Background()
 
-	// empty cache
+	// no metadata at all → stale (caught by digest check)
 	suite.True(suite.checkRecommendCacheOutOfDate(ctx, "0"))
 	err := suite.CacheClient.AddScores(ctx, cache.Recommend, "0", []cache.Score{{Id: "0", Score: 0, Categories: []string{""}}})
 	suite.NoError(err)
 
-	// digest mismatch
+	// scores present but no digest → stale
 	suite.True(suite.checkRecommendCacheOutOfDate(ctx, "0"))
 	err = suite.CacheClient.Set(ctx, cache.String(cache.Key(cache.RecommendDigest, "0"), suite.Config.Recommend.Hash()))
 	suite.NoError(err)
 
+	// digest matches but no recommend time → stale
 	err = suite.CacheClient.Set(ctx, cache.Time(cache.Key(cache.LastModifyUserTime, "0"), time.Now().Add(-time.Hour)))
 	suite.NoError(err)
 	suite.True(suite.checkRecommendCacheOutOfDate(ctx, "0"))
+
+	// recommend time expired → stale
 	err = suite.CacheClient.Set(ctx, cache.Time(cache.Key(cache.RecommendUpdateTime, "0"), time.Now().Add(-time.Hour*100)))
 	suite.NoError(err)
 	suite.True(suite.checkRecommendCacheOutOfDate(ctx, "0"))
+
+	// all metadata valid, user inactive, scores present → not stale
 	err = suite.CacheClient.Set(ctx, cache.Time(cache.Key(cache.RecommendUpdateTime, "0"), time.Now().Add(time.Hour*100)))
 	suite.NoError(err)
 	suite.False(suite.checkRecommendCacheOutOfDate(ctx, "0"))
+
+	// scores deleted but metadata still valid → stale (caught by cache-empty check)
 	err = suite.CacheClient.DeleteScores(ctx, []string{cache.Recommend}, cache.ScoreCondition{Subset: new("0")})
 	suite.NoError(err)
 	suite.True(suite.checkRecommendCacheOutOfDate(ctx, "0"))
+
+	// digest mismatch returns stale regardless of score state
+	err = suite.CacheClient.Set(ctx, cache.String(cache.Key(cache.RecommendDigest, "1"), "wrong-digest"))
+	suite.NoError(err)
+	err = suite.CacheClient.Set(ctx, cache.Time(cache.Key(cache.RecommendUpdateTime, "1"), time.Now().Add(time.Hour*100)))
+	suite.NoError(err)
+	suite.True(suite.checkRecommendCacheOutOfDate(ctx, "1"))
+
+	// user active after recommend → stale regardless of score state
+	err = suite.CacheClient.AddScores(ctx, cache.Recommend, "2", []cache.Score{{Id: "0", Score: 0, Categories: []string{""}}})
+	suite.NoError(err)
+	err = suite.CacheClient.Set(ctx, cache.String(cache.Key(cache.RecommendDigest, "2"), suite.Config.Recommend.Hash()))
+	suite.NoError(err)
+	err = suite.CacheClient.Set(ctx, cache.Time(cache.Key(cache.RecommendUpdateTime, "2"), time.Now().Add(-time.Minute)))
+	suite.NoError(err)
+	err = suite.CacheClient.Set(ctx, cache.Time(cache.Key(cache.LastModifyUserTime, "2"), time.Now()))
+	suite.NoError(err)
+	suite.True(suite.checkRecommendCacheOutOfDate(ctx, "2"))
 }
 
 func (suite *WorkerTestSuite) TestRecommendCollaborative() {

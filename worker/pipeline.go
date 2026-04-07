@@ -274,59 +274,54 @@ func (p *Pipeline) checkUserActiveTime(ctx context.Context, userId string) bool 
 }
 
 // checkRecommendCacheOutOfDate checks if recommend cache stale.
+// Checks are ordered cheapest-first: metadata Get calls before SearchScores.
+// Stale users (digest mismatch, time expired, user active) return early without
+// hitting the documents table. Fresh users still verify cache non-emptiness via
+// a bounded SearchScores(0, 1) to guard against metadata/score inconsistency.
 func (p *Pipeline) checkRecommendCacheOutOfDate(ctx context.Context, userId string) bool {
-	var (
-		activeTime    time.Time
-		recommendTime time.Time
-		err           error
-	)
-
-	// 1. If cache is empty, stale.
-	items, err := p.CacheClient.SearchScores(ctx, cache.Recommend, userId, nil, 0, -1)
-	if err != nil {
-		log.Logger().Error("failed to load offline recommendation", zap.String("user_id", userId), zap.Error(err))
-		return true
-	} else if len(items) == 0 {
-		return true
-	}
-
-	// 2. If digest is empty or not match, stale.
+	// 1. If digest is empty or doesn't match config, stale.
 	digest, err := p.CacheClient.Get(ctx, cache.Key(cache.RecommendDigest, userId)).String()
 	if err != nil {
 		log.Logger().Error("failed to read offline recommendation digest", zap.String("user_id", userId), zap.Error(err))
 		return true
 	}
-	if digest == "" {
-		return true
-	}
-	if digest != p.Config.Recommend.Hash() {
+	if digest == "" || digest != p.Config.Recommend.Hash() {
 		return true
 	}
 
-	// read active time
-	activeTime, err = p.CacheClient.Get(ctx, cache.Key(cache.LastModifyUserTime, userId)).Time()
-	if err != nil {
-		log.Logger().Error("failed to read last modify user time", zap.String("user_id", userId), zap.Error(err))
-	}
-
-	// 3. If update time is empty, stale.
-	recommendTime, err = p.CacheClient.Get(ctx, cache.Key(cache.RecommendUpdateTime, userId)).Time()
+	// 2. If update time is missing, stale.
+	recommendTime, err := p.CacheClient.Get(ctx, cache.Key(cache.RecommendUpdateTime, userId)).Time()
 	if err != nil {
 		log.Logger().Error("failed to read last update user recommend time", zap.Error(err))
 		return true
 	}
 
-	// 4. If update time + cache expire > current time, not stale.
+	// 3. If update time expired, stale.
 	if recommendTime.Before(time.Now().Add(-p.Config.Recommend.CacheExpire)) {
 		return true
 	}
 
-	// 5. If active time > recommend time, not stale.
-	if activeTime.Before(recommendTime) {
-		timeoutTime := recommendTime.Add(p.Config.Recommend.Ranker.CacheExpire)
-		return timeoutTime.Before(time.Now())
+	// 4. If user was active after last recommendation, stale.
+	activeTime, err := p.CacheClient.Get(ctx, cache.Key(cache.LastModifyUserTime, userId)).Time()
+	if err != nil {
+		log.Logger().Error("failed to read last modify user time", zap.String("user_id", userId), zap.Error(err))
 	}
-	return true
+	if !activeTime.Before(recommendTime) {
+		return true
+	}
+
+	// 5. If ranker cache expired, stale.
+	if recommendTime.Add(p.Config.Recommend.Ranker.CacheExpire).Before(time.Now()) {
+		return true
+	}
+
+	// 6. If cache is empty (metadata/score inconsistency), stale.
+	items, err := p.CacheClient.SearchScores(ctx, cache.Recommend, userId, nil, 0, 1)
+	if err != nil {
+		log.Logger().Error("failed to load offline recommendation", zap.String("user_id", userId), zap.Error(err))
+		return true
+	}
+	return len(items) == 0
 }
 
 func (p *Pipeline) updateCollaborativeRecommend(
