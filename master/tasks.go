@@ -1062,6 +1062,10 @@ func (m *Master) trainClickThroughRatePrediction(parent context.Context, trainSe
 			zap.Float32("Recall", m.clickThroughRateTarget.Score.Recall),
 			zap.Any("params", clickThroughRateParams))
 	}
+	if _, hasEpochs := clickThroughRateParams[model.NEpochs]; !hasEpochs {
+		clickThroughRateParams = clickThroughRateParams.Copy()
+		clickThroughRateParams[model.NEpochs] = m.Config.Recommend.Ranker.FitEpoch
+	}
 	clickModel := ctr.NewAFM(clickThroughRateParams)
 	m.clickThroughRateModelMutex.Unlock()
 
@@ -1069,6 +1073,7 @@ func (m *Master) trainClickThroughRatePrediction(parent context.Context, trainSe
 	score := clickModel.Fit(ctx, trainSet, testSet,
 		ctr.NewFitConfig().
 			SetJobs(m.Config.Master.NumJobs).
+			SetVerbose(m.Config.Recommend.Ranker.FitVerbose).
 			SetPatience(m.Config.Recommend.Ranker.EarlyStopping.Patience))
 	RankingFitSeconds.Set(time.Since(startFitTime).Seconds())
 
