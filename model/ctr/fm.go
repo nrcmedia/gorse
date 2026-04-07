@@ -248,8 +248,9 @@ func (fm *AFM) WarmInit(trainSet dataset.CTRSplit, old *AFM) {
 	// Copy bias
 	fm.B.Data()[0] = old.B.Data()[0]
 
-	// Copy A and E layers if embedding dimensions match
-	if len(fm.embeddingDim) == len(old.embeddingDim) {
+	// Copy A and E layers if embedding dimensions and nFactors both match.
+	// A/E shapes are (embeddingDim, nFactors), so both must be identical.
+	if old.nFactors == fm.nFactors && len(fm.embeddingDim) == len(old.embeddingDim) {
 		dimsMatch := true
 		for i := range fm.embeddingDim {
 			if fm.embeddingDim[i] != old.embeddingDim[i] {

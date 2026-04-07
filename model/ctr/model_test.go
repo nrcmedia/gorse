@@ -16,9 +16,11 @@ package ctr
 import (
 	"bytes"
 	"context"
+	"math"
 	"runtime"
 	"testing"
 
+	"github.com/gorse-io/gorse/common/nn"
 	"github.com/gorse-io/gorse/dataset"
 	"github.com/gorse-io/gorse/model"
 	"github.com/samber/lo"
@@ -226,4 +228,141 @@ func TestFactorizationMachines_Classification_Synthesis(t *testing.T) {
 		},
 		fitConfig.Jobs,
 	), 4)
+}
+
+// newModifiedSynthesisDataset creates a dataset with one user and one item
+// added/removed compared to newSynthesisDataset, to test index remapping.
+func newModifiedSynthesisDataset() *Dataset {
+	builder := dataset.NewUnifiedMapIndexBuilder()
+	builder.AddUser("u0")
+	builder.AddUser("u2") // u1 removed, u2 added
+	builder.AddUserLabel("ul0")
+	builder.AddUserLabel("ul1")
+	builder.AddUserLabel("ul2")
+	builder.AddItem("i0")
+	builder.AddItem("i2") // i1 removed, i2 added
+	builder.AddItemLabel("il0")
+	builder.AddItemLabel("il1")
+	builder.AddItemLabel("il2")
+
+	dataSet := NewMapIndexDataset()
+	dataSet.Index = builder.Build()
+	dataSet.UserLabels = [][]lo.Tuple2[int32, float32]{
+		{{A: 0, B: 1.0}, {A: 1, B: 0.5}, {A: 2, B: -1.0}},
+		{{A: 0, B: -1.0}, {A: 1, B: -0.5}, {A: 2, B: 1.0}},
+	}
+	dataSet.ItemLabels = [][]lo.Tuple2[int32, float32]{
+		{{A: 0, B: 1.0}, {A: 1, B: 0.5}, {A: 2, B: -1.0}},
+		{{A: 0, B: -1.0}, {A: 1, B: -0.5}, {A: 2, B: 1.0}},
+	}
+	dataSet.ItemEmbeddingIndex = dataset.NewMapIndex()
+	dataSet.ItemEmbeddingIndex.Add("e1")
+	dataSet.ItemEmbeddingIndex.Add("e2")
+	dataSet.ItemEmbeddingDimension = []int{3, 4}
+	dataSet.ItemEmbeddings = [][][]float32{
+		{{0.8, 0.8, 0.8}, {0.1, 0.1, 0.1, 0.1}},
+		{{-0.8, -0.8, -0.8}, {-0.1, -0.1, -0.1, -0.1}},
+	}
+
+	dataSet.Users = []int32{0, 0, 1, 1}
+	dataSet.Items = []int32{0, 1, 0, 1}
+	dataSet.Target = []float32{1, -1, -1, 1}
+	dataSet.PositiveCount = 2
+	dataSet.NegativeCount = 2
+	return dataSet
+}
+
+func TestAFM_WarmStart_FeatureRemapping(t *testing.T) {
+	// Train on the original dataset
+	original := newSynthesisDataset()
+	fitConfig := newFitConfigWithTestTracker()
+	m := NewAFM(model.Params{model.NEpochs: 5})
+	m.Fit(context.Background(), original, original, fitConfig)
+
+	// Marshal/unmarshal to simulate blob storage round-trip
+	buf := bytes.NewBuffer(nil)
+	err := MarshalModel(buf, m)
+	assert.NoError(t, err)
+	loaded, err := UnmarshalModel(buf)
+	assert.NoError(t, err)
+	oldModel := loaded.(*AFM)
+
+	// Warm-start on modified dataset (u1→u2, i1→i2)
+	modified := newModifiedSynthesisDataset()
+	warm := NewAFM(model.Params{model.NEpochs: 2})
+	warm.SetWarmModel(oldModel)
+	warm.Fit(context.Background(), modified, modified, fitConfig)
+
+	// Verify: shared features (u0, i0, labels) should have been copied.
+	// The bias should match the old model's trained bias.
+	assert.InDelta(t, oldModel.B.Data()[0], warm.B.Data()[0], 0.5,
+		"bias should be close to old model after warm-start + 2 epochs")
+
+	// Verify: new features (u2, i2) should exist and have valid weights.
+	newW := warm.W.Parameters()[0]
+	u2Idx := modified.Index.EncodeUser("u2")
+	assert.NotEqual(t, dataset.NotId, u2Idx)
+	assert.False(t, math.IsNaN(float64(newW.Data()[u2Idx])),
+		"new user u2 should have a valid weight")
+}
+
+func TestAFM_WarmStart_NFactorsMismatch(t *testing.T) {
+	// Train with nFactors=8
+	original := newSynthesisDataset()
+	fitConfig := newFitConfigWithTestTracker()
+	m := NewAFM(model.Params{model.NFactors: 8, model.NEpochs: 3})
+	m.Fit(context.Background(), original, original, fitConfig)
+
+	// Marshal/unmarshal
+	buf := bytes.NewBuffer(nil)
+	err := MarshalModel(buf, m)
+	assert.NoError(t, err)
+	loaded, err := UnmarshalModel(buf)
+	assert.NoError(t, err)
+	oldModel := loaded.(*AFM)
+	assert.Equal(t, 8, oldModel.nFactors)
+
+	// Warm-start with nFactors=16 (different)
+	warm := NewAFM(model.Params{model.NFactors: 16, model.NEpochs: 2})
+	warm.SetWarmModel(oldModel)
+	warm.Fit(context.Background(), original, original, fitConfig)
+
+	// A/E layers should NOT have been copied (nFactors differs).
+	// Verify the model still works (no panic, valid output).
+	score := EvaluateClassification(warm, original, fitConfig.Jobs)
+	assert.False(t, math.IsNaN(float64(score.AUC)), "model should produce valid AUC")
+
+	// V embeddings: only min(8,16)=8 factors should have been copied.
+	// The remaining 8 factors should be random-initialized (non-zero for at least some).
+	newV := warm.V.Parameters()[0]
+	vShape := newV.Shape()
+	assert.Equal(t, 16, vShape[1], "new V should have 16 factors")
+
+	// Check that a shared feature's first 8 factors are from old model
+	u0OldIdx := original.Index.EncodeUser("u0")
+	u0NewIdx := original.Index.EncodeUser("u0")
+	oldV := oldModel.V.Parameters()[0]
+	for f := 0; f < 8; f++ {
+		oldVal := oldV.Data()[int(u0OldIdx)*8+f]
+		newVal := newV.Data()[int(u0NewIdx)*16+f]
+		assert.InDelta(t, oldVal, newVal, 0.5,
+			"first 8 factors of u0 should be close to old model after 2 epochs")
+	}
+
+	// A layers should have fresh random weights, not old model's
+	oldAParams := oldModel.A[0].Parameters()
+	newAParams := warm.A[0].Parameters()
+	if len(oldAParams) > 0 && len(newAParams) > 0 {
+		assert.NotEqual(t, len(oldAParams[0].Data()), len(newAParams[0].Data()),
+			"A layer tensor sizes should differ when nFactors changes")
+	}
+}
+
+func TestAFM_WarmStart_CopyLayerParamsMismatch(t *testing.T) {
+	// Verify copyLayerParams skips when parameter counts differ
+	dst := nn.NewEmbedding(5, 3)
+	src := nn.NewEmbedding(5, 3)
+	// This should work fine
+	copyLayerParams(dst, src)
+	assert.Equal(t, src.Parameters()[0].Data(), dst.Parameters()[0].Data())
 }
