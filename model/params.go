@@ -88,6 +88,8 @@ func (parameters Params) GetInt(name ParamName, _default int) int {
 		switch val := val.(type) {
 		case int:
 			return val
+		case float64:
+			return int(val)
 		default:
 			log.Logger().Error("type mismatch",
 				zap.String("param_name", string(name)),
@@ -105,6 +107,8 @@ func (parameters Params) GetInt64(name ParamName, _default int64) int64 {
 		case int64:
 			return val
 		case int:
+			return int64(val)
+		case float64:
 			return int64(val)
 		default:
 			log.Logger().Error("type mismatch",
