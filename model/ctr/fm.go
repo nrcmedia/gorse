@@ -241,9 +241,8 @@ func (fm *AFM) Init(trainSet dataset.CTRSplit) {
 
 // WarmInit initializes the model from a previous training cycle's weights.
 // Features present in both old and new index are copied; new features get random init.
-func (fm *AFM) WarmInit(trainSet dataset.CTRSplit, old *AFM) {
+func (fm *AFM) warmInit(trainSet dataset.CTRSplit, old *AFM) {
 	fm.Init(trainSet)
-	newIndex := trainSet.GetIndex()
 
 	// Copy bias
 	fm.B.Data()[0] = old.B.Data()[0]
@@ -273,11 +272,11 @@ func (fm *AFM) WarmInit(trainSet dataset.CTRSplit, old *AFM) {
 		newEnc   func(string) int32
 	}
 	categories := []featureCategory{
-		{old.Index.GetUsers, old.Index.EncodeUser, newIndex.EncodeUser},
-		{old.Index.GetItems, old.Index.EncodeItem, newIndex.EncodeItem},
-		{old.Index.GetUserLabels, old.Index.EncodeUserLabel, newIndex.EncodeUserLabel},
-		{old.Index.GetItemLabels, old.Index.EncodeItemLabel, newIndex.EncodeItemLabel},
-		{old.Index.GetContextLabels, old.Index.EncodeContextLabel, newIndex.EncodeContextLabel},
+		{old.Index.GetUsers, old.Index.EncodeUser, fm.Index.EncodeUser},
+		{old.Index.GetItems, old.Index.EncodeItem, fm.Index.EncodeItem},
+		{old.Index.GetUserLabels, old.Index.EncodeUserLabel, fm.Index.EncodeUserLabel},
+		{old.Index.GetItemLabels, old.Index.EncodeItemLabel, fm.Index.EncodeItemLabel},
+		{old.Index.GetContextLabels, old.Index.EncodeContextLabel, fm.Index.EncodeContextLabel},
 	}
 
 	oldW := old.W.Parameters()[0]
@@ -309,10 +308,10 @@ func (fm *AFM) WarmInit(trainSet dataset.CTRSplit, old *AFM) {
 	}
 
 	log.Logger().Info("warm-started AFM",
-		zap.Int("total_features", int(newIndex.Len())),
+		zap.Int("total_features", int(fm.Index.Len())),
 		zap.Int("copied_features", copied),
 		zap.Int("old_features", total),
-		zap.Int("random_init_features", int(newIndex.Len())-copied))
+		zap.Int("random_init_features", int(fm.Index.Len())-copied))
 }
 
 // copyLayerParams copies all parameter tensors from src to dst.
@@ -336,7 +335,7 @@ func (fm *AFM) Fit(ctx context.Context, trainSet, testSet dataset.CTRSplit, conf
 		zap.Any("params", fm.GetParams()),
 		zap.Any("config", config))
 	if fm.warmModel != nil {
-		fm.WarmInit(trainSet, fm.warmModel)
+		fm.warmInit(trainSet, fm.warmModel)
 		fm.warmModel = nil
 	} else {
 		fm.Init(trainSet)

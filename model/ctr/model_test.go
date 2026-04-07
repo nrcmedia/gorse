@@ -338,13 +338,13 @@ func TestAFM_WarmStart_NFactorsMismatch(t *testing.T) {
 	vShape := newV.Shape()
 	assert.Equal(t, 16, vShape[1], "new V should have 16 factors")
 
-	// Check that a shared feature's first 8 factors are from old model
-	u0OldIdx := original.Index.EncodeUser("u0")
-	u0NewIdx := original.Index.EncodeUser("u0")
+	// Check that a shared feature's first 8 factors are from old model.
+	// Both models use the same dataset, so the index for u0 is the same.
+	u0Idx := original.Index.EncodeUser("u0")
 	oldV := oldModel.V.Parameters()[0]
 	for f := 0; f < 8; f++ {
-		oldVal := oldV.Data()[int(u0OldIdx)*8+f]
-		newVal := newV.Data()[int(u0NewIdx)*16+f]
+		oldVal := oldV.Data()[int(u0Idx)*8+f]
+		newVal := newV.Data()[int(u0Idx)*16+f]
 		assert.InDelta(t, oldVal, newVal, 0.5,
 			"first 8 factors of u0 should be close to old model after 2 epochs")
 	}
