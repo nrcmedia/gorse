@@ -62,12 +62,19 @@ type AFM struct {
 	numDimension   int
 	embeddingDim   []int
 	embeddingIndex *dataset.Index
+	// warm-starting
+	warmModel *AFM
 }
 
 func NewAFM(params model.Params) *AFM {
 	fm := new(AFM)
 	fm.SetParams(params)
 	return fm
+}
+
+// SetWarmModel sets a previous model to use for warm-starting the next Fit call.
+func (fm *AFM) SetWarmModel(old *AFM) {
+	fm.warmModel = old
 }
 
 func (fm *AFM) SuggestParams(trial goptuna.Trial) model.Params {
@@ -232,13 +239,107 @@ func (fm *AFM) Init(trainSet dataset.CTRSplit) {
 	fm.BaseFactorizationMachines.Init(trainSet)
 }
 
+// WarmInit initializes the model from a previous training cycle's weights.
+// Features present in both old and new index are copied; new features get random init.
+func (fm *AFM) WarmInit(trainSet dataset.CTRSplit, old *AFM) {
+	fm.Init(trainSet)
+	newIndex := trainSet.GetIndex()
+
+	// Copy bias
+	fm.B.Data()[0] = old.B.Data()[0]
+
+	// Copy A and E layers if embedding dimensions match
+	if len(fm.embeddingDim) == len(old.embeddingDim) {
+		dimsMatch := true
+		for i := range fm.embeddingDim {
+			if fm.embeddingDim[i] != old.embeddingDim[i] {
+				dimsMatch = false
+				break
+			}
+		}
+		if dimsMatch {
+			for i := range fm.embeddingDim {
+				copyLayerParams(fm.A[i], old.A[i])
+				copyLayerParams(fm.E[i], old.E[i])
+			}
+		}
+	}
+
+	// Remap W and V embeddings from old to new feature index
+	type featureCategory struct {
+		getNames func() []string
+		oldEnc   func(string) int32
+		newEnc   func(string) int32
+	}
+	categories := []featureCategory{
+		{old.Index.GetUsers, old.Index.EncodeUser, newIndex.EncodeUser},
+		{old.Index.GetItems, old.Index.EncodeItem, newIndex.EncodeItem},
+		{old.Index.GetUserLabels, old.Index.EncodeUserLabel, newIndex.EncodeUserLabel},
+		{old.Index.GetItemLabels, old.Index.EncodeItemLabel, newIndex.EncodeItemLabel},
+		{old.Index.GetContextLabels, old.Index.EncodeContextLabel, newIndex.EncodeContextLabel},
+	}
+
+	oldW := old.W.Parameters()[0]
+	oldV := old.V.Parameters()[0]
+	newW := fm.W.Parameters()[0]
+	newV := fm.V.Parameters()[0]
+	oldNFactors := old.nFactors
+	newNFactors := fm.nFactors
+	copyFactors := min(oldNFactors, newNFactors)
+
+	var copied, total int
+	for _, cat := range categories {
+		for _, name := range cat.getNames() {
+			total++
+			oldIdx := cat.oldEnc(name)
+			newIdx := cat.newEnc(name)
+			if oldIdx == dataset.NotId || newIdx == dataset.NotId {
+				continue
+			}
+			// Copy W row (width 1)
+			newW.Data()[newIdx] = oldW.Data()[oldIdx]
+			// Copy V row (width may differ between old and new)
+			copy(
+				newV.Data()[int(newIdx)*newNFactors:int(newIdx)*newNFactors+copyFactors],
+				oldV.Data()[int(oldIdx)*oldNFactors:int(oldIdx)*oldNFactors+copyFactors],
+			)
+			copied++
+		}
+	}
+
+	log.Logger().Info("warm-started AFM",
+		zap.Int("total_features", int(newIndex.Len())),
+		zap.Int("copied_features", copied),
+		zap.Int("old_features", total),
+		zap.Int("random_init_features", int(newIndex.Len())-copied))
+}
+
+// copyLayerParams copies all parameter tensors from src to dst.
+func copyLayerParams(dst, src nn.Layer) {
+	dstParams := dst.Parameters()
+	srcParams := src.Parameters()
+	if len(dstParams) != len(srcParams) {
+		log.Logger().Warn("copyLayerParams: parameter count mismatch, skipping",
+			zap.Int("dst", len(dstParams)), zap.Int("src", len(srcParams)))
+		return
+	}
+	for i := range dstParams {
+		copy(dstParams[i].Data(), srcParams[i].Data())
+	}
+}
+
 func (fm *AFM) Fit(ctx context.Context, trainSet, testSet dataset.CTRSplit, config *FitConfig) Score {
 	log.Logger().Info("fit AFM",
 		zap.Int("train_set_size", trainSet.Count()),
 		zap.Int("test_set_size", testSet.Count()),
 		zap.Any("params", fm.GetParams()),
 		zap.Any("config", config))
-	fm.Init(trainSet)
+	if fm.warmModel != nil {
+		fm.WarmInit(trainSet, fm.warmModel)
+		fm.warmModel = nil
+	} else {
+		fm.Init(trainSet)
+	}
 	fm.W.SetJobs(config.Jobs)
 	fm.V.SetJobs(config.Jobs)
 	for i := range fm.embeddingDim {
