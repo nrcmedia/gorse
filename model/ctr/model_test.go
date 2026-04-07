@@ -358,11 +358,20 @@ func TestAFM_WarmStart_NFactorsMismatch(t *testing.T) {
 	}
 }
 
-func TestAFM_WarmStart_CopyLayerParamsMismatch(t *testing.T) {
-	// Verify copyLayerParams skips when parameter counts differ
+func TestAFM_WarmStart_CopyLayerParams(t *testing.T) {
+	// Happy path: matching layers
 	dst := nn.NewEmbedding(5, 3)
 	src := nn.NewEmbedding(5, 3)
-	// This should work fine
 	copyLayerParams(dst, src)
 	assert.Equal(t, src.Parameters()[0].Data(), dst.Parameters()[0].Data())
+
+	// Mismatch: Attention has 2+ parameters, Embedding has 1.
+	// copyLayerParams should skip without panicking.
+	embedding := nn.NewEmbedding(5, 3)
+	attention := nn.NewAttention(3, 4)
+	dataBefore := make([]float32, len(embedding.Parameters()[0].Data()))
+	copy(dataBefore, embedding.Parameters()[0].Data())
+	copyLayerParams(embedding, attention) // should warn and skip
+	assert.Equal(t, dataBefore, embedding.Parameters()[0].Data(),
+		"destination should be unchanged when parameter counts differ")
 }
