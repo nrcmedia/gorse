@@ -25,7 +25,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
-	"sync"
 	"testing"
 	"time"
 
@@ -125,7 +124,7 @@ func (suite *WorkerTestSuite) SetupTest() {
 	// reset index
 	suite.MatrixFactorizationItems = nil
 	suite.ClickThroughRateModel = nil
-	suite.recommendTimes = sync.Map{}
+	suite.recommendTimes = nil
 	suite.lastDigest = ""
 }
 
@@ -233,7 +232,7 @@ func (suite *WorkerTestSuite) TestFastPathScoresDeleted() {
 		cache.Time(cache.Key(cache.LastModifyUserTime, "fp1"), recommendTime.Add(-time.Hour)),
 	)
 	suite.NoError(err)
-	suite.recommendTimes.Store("fp1", recommendTime)
+	suite.storeRecommendTime("fp1", recommendTime)
 
 	// With scores present the fast path should report not-stale.
 	err = suite.CacheClient.AddScores(ctx, cache.Recommend, "fp1", []cache.Score{{Id: "i1", Score: 1, Categories: []string{""}}})
@@ -267,7 +266,7 @@ func (suite *WorkerTestSuite) TestInMemoryNotStoredOnPersistFailure() {
 	wrappedCache.failSet = true
 	suite.Recommend(ctx, []data.User{{UserId: "fp2"}}, nil)
 
-	_, ok := suite.recommendTimes.Load("fp2")
+	_, ok := suite.loadRecommendTime("fp2")
 	suite.False(ok)
 
 	// Scores may already have been written, but without persisted metadata the

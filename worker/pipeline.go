@@ -47,7 +47,8 @@ type Pipeline struct {
 	MatrixFactorizationUsers *logics.MatrixFactorizationUsers
 	ClickThroughRateModel    ctr.FactorizationMachines
 	dontskipColdStartUsers   bool
-	recommendTimes           sync.Map // userId (string) → recommendTime (time.Time)
+	freshnessMu              sync.Mutex
+	recommendTimes           map[string]time.Time
 	lastDigest               string
 }
 
@@ -55,21 +56,7 @@ func (p *Pipeline) Recommend(ctx context.Context, users []data.User, progress fu
 	startRecommendTime := time.Now()
 	// Update digest and evict stale entries from the in-memory freshness cache.
 	configDigest := p.Config.Recommend.Hash()
-	if p.lastDigest != configDigest {
-		p.recommendTimes.Range(func(key, _ any) bool {
-			p.recommendTimes.Delete(key)
-			return true
-		})
-		p.lastDigest = configDigest
-	} else {
-		freshnessTTL := min(p.Config.Recommend.CacheExpire, p.Config.Recommend.Ranker.CacheExpire)
-		p.recommendTimes.Range(func(key, value any) bool {
-			if time.Since(value.(time.Time)) >= freshnessTTL {
-				p.recommendTimes.Delete(key)
-			}
-			return true
-		})
-	}
+	p.resetFreshnessCache(configDigest)
 	// Pre-fetch latest items once per cycle. Items inserted after this point won't
 	// appear until the next cycle, but eliminating per-user queries makes the cycle
 	// itself faster, reducing the overall latency for new items to surface.
@@ -276,7 +263,7 @@ func (p *Pipeline) Recommend(ctx context.Context, users []data.User, progress fu
 		); err != nil {
 			log.Logger().Error("failed to cache recommendation time", zap.Error(err))
 		} else {
-			p.recommendTimes.Store(userId, recommendTime)
+			p.storeRecommendTime(userId, recommendTime)
 		}
 	}); err != nil {
 		log.Logger().Error("recommendation was cancelled", zap.Error(err))
@@ -291,6 +278,44 @@ func (p *Pipeline) Recommend(ctx context.Context, users []data.User, progress fu
 	OfflineRecommendStepSecondsVec.WithLabelValues("user_based_recommend").Set(userBasedRecommendSeconds.Load())
 	OfflineRecommendStepSecondsVec.WithLabelValues("latest_recommend").Set(latestRecommendSeconds.Load())
 	OfflineRecommendStepSecondsVec.WithLabelValues("popular_recommend").Set(popularRecommendSeconds.Load())
+}
+
+func (p *Pipeline) resetFreshnessCache(configDigest string) {
+	p.freshnessMu.Lock()
+	defer p.freshnessMu.Unlock()
+	if p.recommendTimes == nil {
+		p.recommendTimes = make(map[string]time.Time)
+	}
+	if p.lastDigest != configDigest {
+		clear(p.recommendTimes)
+		p.lastDigest = configDigest
+		return
+	}
+	freshnessTTL := min(p.Config.Recommend.CacheExpire, p.Config.Recommend.Ranker.CacheExpire)
+	for userID, recommendTime := range p.recommendTimes {
+		if time.Since(recommendTime) >= freshnessTTL {
+			delete(p.recommendTimes, userID)
+		}
+	}
+}
+
+func (p *Pipeline) loadRecommendTime(userId string) (time.Time, bool) {
+	p.freshnessMu.Lock()
+	defer p.freshnessMu.Unlock()
+	if p.recommendTimes == nil {
+		return time.Time{}, false
+	}
+	recommendTime, ok := p.recommendTimes[userId]
+	return recommendTime, ok
+}
+
+func (p *Pipeline) storeRecommendTime(userId string, recommendTime time.Time) {
+	p.freshnessMu.Lock()
+	defer p.freshnessMu.Unlock()
+	if p.recommendTimes == nil {
+		p.recommendTimes = make(map[string]time.Time)
+	}
+	p.recommendTimes[userId] = recommendTime
 }
 
 // checkUserActiveTime checks if a user is active based on their last modification time.
@@ -322,8 +347,7 @@ func (p *Pipeline) checkRecommendCacheOutOfDate(ctx context.Context, userId, con
 	// skip the expensive digest checks. We still check user activity so that
 	// active users get re-recommended promptly, and verify that at least one
 	// cached score exists (guards against deleted/missing recommendation rows).
-	if rt, ok := p.recommendTimes.Load(userId); ok {
-		memRecommendTime := rt.(time.Time)
+	if memRecommendTime, ok := p.loadRecommendTime(userId); ok {
 		freshnessTTL := min(p.Config.Recommend.CacheExpire, p.Config.Recommend.Ranker.CacheExpire)
 		if time.Since(memRecommendTime) < freshnessTTL {
 			if activeTime.After(memRecommendTime) {
