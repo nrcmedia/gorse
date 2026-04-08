@@ -61,8 +61,16 @@ func (suite *WorkerTestSuite) checkUserActiveTime(ctx context.Context, userId st
 }
 
 func (suite *WorkerTestSuite) checkRecommendCacheOutOfDate(ctx context.Context, userId, configDigest string) bool {
-	activeTime, _ := suite.CacheClient.Get(ctx, cache.Key(cache.LastModifyUserTime, userId)).Time()
-	return suite.Pipeline.checkRecommendCacheOutOfDate(ctx, userId, configDigest, activeTime)
+	values := suite.CacheClient.GetValues(
+		ctx,
+		cache.Key(cache.LastModifyUserTime, userId),
+		cache.Key(cache.RecommendDigest, userId),
+		cache.Key(cache.RecommendUpdateTime, userId),
+	)
+	activeTime, _ := values[0].Time()
+	digest, _ := values[1].String()
+	recommendTime, _ := values[2].Time()
+	return suite.Pipeline.checkRecommendCacheOutOfDate(ctx, userId, configDigest, activeTime, digest, recommendTime)
 }
 
 func (suite *WorkerTestSuite) SetupSuite() {

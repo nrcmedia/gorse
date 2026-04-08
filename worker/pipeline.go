@@ -113,13 +113,26 @@ func (p *Pipeline) Recommend(ctx context.Context, users []data.User, progress fu
 		}()
 		user := users[jobId]
 		userId := user.UserId
-		// Fetch active time once — used by both staleness checks.
-		activeTime, err := p.CacheClient.Get(ctx, cache.Key(cache.LastModifyUserTime, userId)).Time()
+		cacheValues := p.CacheClient.GetValues(
+			ctx,
+			cache.Key(cache.LastModifyUserTime, userId),
+			cache.Key(cache.RecommendDigest, userId),
+			cache.Key(cache.RecommendUpdateTime, userId),
+		)
+		activeTime, err := cacheValues[0].Time()
 		if err != nil {
 			log.Logger().Error("failed to read last modify user time", zap.String("user_id", userId), zap.Error(err))
 		}
+		cacheDigest, err := cacheValues[1].String()
+		if err != nil {
+			log.Logger().Error("failed to read offline recommendation digest", zap.String("user_id", userId), zap.Error(err))
+		}
+		recommendUpdateTime, err := cacheValues[2].Time()
+		if err != nil {
+			log.Logger().Error("failed to read last update user recommend time", zap.String("user_id", userId), zap.Error(err))
+		}
 		// skip inactive users before max recommend period
-		if !p.checkUserActiveTime(ctx, userId, activeTime) || !p.checkRecommendCacheOutOfDate(ctx, userId, configDigest, activeTime) {
+		if !p.checkUserActiveTime(ctx, userId, activeTime) || !p.checkRecommendCacheOutOfDate(ctx, userId, configDigest, activeTime, cacheDigest, recommendUpdateTime) {
 			return
 		}
 		updateUserCount.Add(1)
@@ -282,21 +295,9 @@ func (p *Pipeline) checkUserActiveTime(ctx context.Context, userId string, activ
 
 // checkRecommendCacheOutOfDate checks if recommend cache is stale.
 // Checks are ordered cheapest-first to avoid SearchScores on the common stale path.
-func (p *Pipeline) checkRecommendCacheOutOfDate(ctx context.Context, userId, configDigest string, activeTime time.Time) bool {
+func (p *Pipeline) checkRecommendCacheOutOfDate(ctx context.Context, userId, configDigest string, activeTime time.Time, digest string, recommendTime time.Time) bool {
 	now := time.Now()
-
-	digest, err := p.CacheClient.Get(ctx, cache.Key(cache.RecommendDigest, userId)).String()
-	if err != nil {
-		log.Logger().Error("failed to read offline recommendation digest", zap.String("user_id", userId), zap.Error(err))
-		return true
-	}
 	if digest != configDigest {
-		return true
-	}
-
-	recommendTime, err := p.CacheClient.Get(ctx, cache.Key(cache.RecommendUpdateTime, userId)).Time()
-	if err != nil {
-		log.Logger().Error("failed to read last update user recommend time", zap.Error(err))
 		return true
 	}
 	if recommendTime.IsZero() || recommendTime.Before(now.Add(-p.Config.Recommend.CacheExpire)) {

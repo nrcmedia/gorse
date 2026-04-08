@@ -303,6 +303,41 @@ func (db *SQLDatabase) Get(ctx context.Context, name string) *ReturnValue {
 	return &ReturnValue{value: "", exists: false}
 }
 
+func (db *SQLDatabase) GetValues(ctx context.Context, names ...string) []*ReturnValue {
+	if len(names) == 0 {
+		return nil
+	}
+	type row struct {
+		Name  string
+		Value string
+	}
+	var rows []row
+	err := db.gormDB.WithContext(ctx).Table(db.ValuesTable()).
+		Where("name IN ?", names).
+		Select("name", "value").
+		Find(&rows).Error
+	if err != nil {
+		results := make([]*ReturnValue, len(names))
+		for i := range results {
+			results[i] = &ReturnValue{err: errors.Trace(err), exists: false}
+		}
+		return results
+	}
+	values := make(map[string]string, len(rows))
+	for _, row := range rows {
+		values[row.Name] = row.Value
+	}
+	results := make([]*ReturnValue, len(names))
+	for i, name := range names {
+		if value, ok := values[name]; ok {
+			results[i] = &ReturnValue{value: value, exists: true}
+		} else {
+			results[i] = &ReturnValue{value: "", exists: false}
+		}
+	}
+	return results
+}
+
 func (db *SQLDatabase) Delete(ctx context.Context, name string) error {
 	err := db.gormDB.WithContext(ctx).Delete(&SQLValue{Name: name}).Error
 	return errors.Trace(err)

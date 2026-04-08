@@ -250,6 +250,10 @@ func (r *Recommender) recommendItemToItem(name string) RecommenderFunc {
 				userFeedback = append(userFeedback, feedback)
 			}
 		}
+		digestKeys := lo.Map(userFeedback, func(feedback data.Feedback, _ int) string {
+			return cache.Key(cache.ItemToItemDigest, name, feedback.ItemId)
+		})
+		digestValues := r.cacheClient.GetValues(ctx, digestKeys...)
 		type itemToItemResult struct {
 			similarItems []cache.Score
 			digest       string
@@ -260,7 +264,7 @@ func (r *Recommender) recommendItemToItem(name string) RecommenderFunc {
 			if err != nil {
 				return errors.Trace(err)
 			}
-			digest, err := r.cacheClient.Get(ctx, cache.Key(cache.ItemToItemDigest, name, userFeedback[jobId].ItemId)).String()
+			digest, err := digestValues[jobId].String()
 			if err != nil {
 				return errors.Trace(err)
 			}

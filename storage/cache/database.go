@@ -220,6 +220,7 @@ type Database interface {
 
 	Set(ctx context.Context, values ...Value) error
 	Get(ctx context.Context, name string) *ReturnValue
+	GetValues(ctx context.Context, names ...string) []*ReturnValue
 	Delete(ctx context.Context, name string) error
 
 	Push(ctx context.Context, name, value string) error
