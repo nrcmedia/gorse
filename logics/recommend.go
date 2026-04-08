@@ -300,9 +300,10 @@ func (r *Recommender) recommendUserToUser(name string) RecommenderFunc {
 		if err != nil {
 			return nil, "", errors.Trace(err)
 		}
-		// Fetch all similar users' feedback concurrently.
+		// Fetch all similar users' feedback concurrently (capped to avoid saturating the DB pool
+		// when the outer pipeline already runs p.Jobs concurrent users).
 		userFeedbacks := make([][]data.Feedback, len(similarUsers))
-		if err := parallel.Parallel(ctx, len(similarUsers), len(similarUsers), func(_, jobId int) error {
+		if err := parallel.Parallel(ctx, len(similarUsers), min(len(similarUsers), 8), func(_, jobId int) error {
 			feedbacks, err := r.dataClient.GetUserFeedback(ctx, similarUsers[jobId].Id, lo.ToPtr(time.Now()), r.config.DataSource.PositiveFeedbackTypes...)
 			if err != nil {
 				return errors.Trace(err)

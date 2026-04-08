@@ -54,6 +54,17 @@ type WorkerTestSuite struct {
 	Worker
 }
 
+// Test helpers that fetch activeTime from cache, matching the production caller in Pipeline.Recommend.
+func (suite *WorkerTestSuite) checkUserActiveTime(ctx context.Context, userId string) bool {
+	activeTime, _ := suite.CacheClient.Get(ctx, cache.Key(cache.LastModifyUserTime, userId)).Time()
+	return suite.Pipeline.checkUserActiveTime(ctx, userId, activeTime)
+}
+
+func (suite *WorkerTestSuite) checkRecommendCacheOutOfDate(ctx context.Context, userId, configDigest string) bool {
+	activeTime, _ := suite.CacheClient.Get(ctx, cache.Key(cache.LastModifyUserTime, userId)).Time()
+	return suite.Pipeline.checkRecommendCacheOutOfDate(ctx, userId, configDigest, activeTime)
+}
+
 func (suite *WorkerTestSuite) SetupSuite() {
 	// open database
 	var err error

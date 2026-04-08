@@ -53,10 +53,12 @@ func (p *Pipeline) Recommend(ctx context.Context, users []data.User, progress fu
 	startRecommendTime := time.Now()
 	itemCache := NewItemCache(p.DataClient)
 	configDigest := p.Config.Recommend.Hash()
-	// Pre-fetch latest items once per cycle — identical for all users.
+	// Pre-fetch latest items once per cycle. Items inserted after this point won't
+	// appear until the next cycle, but eliminating per-user queries makes the cycle
+	// itself faster, reducing the overall latency for new items to surface.
 	latestItems, err := p.DataClient.GetLatestItems(ctx, p.Config.Recommend.CacheSize, nil)
 	if err != nil {
-		log.Logger().Error("failed to pre-fetch latest items", zap.Error(err))
+		log.Logger().Error("failed to pre-fetch latest items, falling back to per-user queries", zap.Error(err))
 	}
 	log.Logger().Info("ranking recommendation",
 		zap.Int("n_working_users", len(users)),
