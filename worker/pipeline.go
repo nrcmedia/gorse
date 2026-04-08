@@ -47,12 +47,29 @@ type Pipeline struct {
 	MatrixFactorizationUsers *logics.MatrixFactorizationUsers
 	ClickThroughRateModel    ctr.FactorizationMachines
 	dontskipColdStartUsers   bool
+	recommendTimes           sync.Map // userId (string) → recommendTime (time.Time)
+	lastDigest               string
 }
 
 func (p *Pipeline) Recommend(ctx context.Context, users []data.User, progress func(completed, throughput int)) {
 	startRecommendTime := time.Now()
-	itemCache := NewItemCache(p.DataClient)
+	// Update digest and evict stale entries from the in-memory freshness cache.
 	configDigest := p.Config.Recommend.Hash()
+	if p.lastDigest != configDigest {
+		p.recommendTimes.Range(func(key, _ any) bool {
+			p.recommendTimes.Delete(key)
+			return true
+		})
+		p.lastDigest = configDigest
+	} else {
+		freshnessTTL := min(p.Config.Recommend.CacheExpire, p.Config.Recommend.Ranker.CacheExpire)
+		p.recommendTimes.Range(func(key, value any) bool {
+			if time.Since(value.(time.Time)) >= freshnessTTL {
+				p.recommendTimes.Delete(key)
+			}
+			return true
+		})
+	}
 	// Pre-fetch latest items once per cycle. Items inserted after this point won't
 	// appear until the next cycle, but eliminating per-user queries makes the cycle
 	// itself faster, reducing the overall latency for new items to surface.
@@ -60,6 +77,7 @@ func (p *Pipeline) Recommend(ctx context.Context, users []data.User, progress fu
 	if err != nil {
 		log.Logger().Error("failed to pre-fetch latest items, falling back to per-user queries", zap.Error(err))
 	}
+	itemCache := NewItemCache(p.DataClient)
 	log.Logger().Info("ranking recommendation",
 		zap.Int("n_working_users", len(users)),
 		zap.Int("n_jobs", p.Jobs),
@@ -257,6 +275,8 @@ func (p *Pipeline) Recommend(ctx context.Context, users []data.User, progress fu
 			cache.String(cache.Key(cache.RecommendDigest, userId), digest),
 		); err != nil {
 			log.Logger().Error("failed to cache recommendation time", zap.Error(err))
+		} else {
+			p.recommendTimes.Store(userId, recommendTime)
 		}
 	}); err != nil {
 		log.Logger().Error("recommendation was cancelled", zap.Error(err))
@@ -297,6 +317,27 @@ func (p *Pipeline) checkUserActiveTime(ctx context.Context, userId string, activ
 // Checks are ordered cheapest-first to avoid SearchScores on the common stale path.
 func (p *Pipeline) checkRecommendCacheOutOfDate(ctx context.Context, userId, configDigest string, activeTime time.Time, digest string, recommendTime time.Time) bool {
 	now := time.Now()
+
+	// Fast path: if we have an in-memory recommend time within the cache TTL,
+	// skip the expensive digest checks. We still check user activity so that
+	// active users get re-recommended promptly, and verify that at least one
+	// cached score exists (guards against deleted/missing recommendation rows).
+	if rt, ok := p.recommendTimes.Load(userId); ok {
+		memRecommendTime := rt.(time.Time)
+		freshnessTTL := min(p.Config.Recommend.CacheExpire, p.Config.Recommend.Ranker.CacheExpire)
+		if time.Since(memRecommendTime) < freshnessTTL {
+			if activeTime.After(memRecommendTime) {
+				return true
+			}
+			// Verify scores actually exist before trusting the fast path.
+			items, err := p.CacheClient.SearchScores(ctx, cache.Recommend, userId, nil, 0, 1)
+			if err != nil || len(items) == 0 {
+				return true
+			}
+			return false
+		}
+	}
+
 	if digest != configDigest {
 		return true
 	}

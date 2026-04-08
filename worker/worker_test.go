@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -73,6 +74,18 @@ func (suite *WorkerTestSuite) checkRecommendCacheOutOfDate(ctx context.Context, 
 	return suite.Pipeline.checkRecommendCacheOutOfDate(ctx, userId, configDigest, activeTime, digest, recommendTime)
 }
 
+type failingSetCache struct {
+	cache.Database
+	failSet bool
+}
+
+func (c *failingSetCache) Set(ctx context.Context, values ...cache.Value) error {
+	if c.failSet {
+		return assert.AnError
+	}
+	return c.Database.Set(ctx, values...)
+}
+
 func (suite *WorkerTestSuite) SetupSuite() {
 	// open database
 	var err error
@@ -112,6 +125,8 @@ func (suite *WorkerTestSuite) SetupTest() {
 	// reset index
 	suite.MatrixFactorizationItems = nil
 	suite.ClickThroughRateModel = nil
+	suite.recommendTimes = sync.Map{}
+	suite.lastDigest = ""
 }
 
 func (suite *WorkerTestSuite) TestPullUsers() {
@@ -204,6 +219,60 @@ func (suite *WorkerTestSuite) TestCheckRecommendCacheTimeout() {
 	)
 	suite.NoError(err)
 	suite.True(suite.checkRecommendCacheOutOfDate(ctx, "3", rankerDigest))
+}
+
+func (suite *WorkerTestSuite) TestFastPathScoresDeleted() {
+	ctx := context.Background()
+	configDigest := suite.Config.Recommend.Hash()
+
+	// Set up a user with valid metadata and an in-memory freshness entry.
+	recommendTime := time.Now().Add(-time.Minute)
+	err := suite.CacheClient.Set(ctx,
+		cache.String(cache.Key(cache.RecommendDigest, "fp1"), configDigest),
+		cache.Time(cache.Key(cache.RecommendUpdateTime, "fp1"), recommendTime),
+		cache.Time(cache.Key(cache.LastModifyUserTime, "fp1"), recommendTime.Add(-time.Hour)),
+	)
+	suite.NoError(err)
+	suite.recommendTimes.Store("fp1", recommendTime)
+
+	// With scores present the fast path should report not-stale.
+	err = suite.CacheClient.AddScores(ctx, cache.Recommend, "fp1", []cache.Score{{Id: "i1", Score: 1, Categories: []string{""}}})
+	suite.NoError(err)
+	suite.False(suite.checkRecommendCacheOutOfDate(ctx, "fp1", configDigest))
+
+	// Delete the cached scores — the fast path must now detect staleness
+	// instead of trusting the in-memory entry alone.
+	err = suite.CacheClient.DeleteScores(ctx, []string{cache.Recommend}, cache.ScoreCondition{Subset: new("fp1")})
+	suite.NoError(err)
+	suite.True(suite.checkRecommendCacheOutOfDate(ctx, "fp1", configDigest))
+}
+
+func (suite *WorkerTestSuite) TestInMemoryNotStoredOnPersistFailure() {
+	ctx := context.Background()
+	suite.Config.Recommend.Ranker.Recommenders = []string{"latest"}
+	suite.Config.Recommend.Fallback.Recommenders = nil
+
+	err := suite.DataClient.BatchInsertItems(ctx, []data.Item{
+		{ItemId: "persist_item", Timestamp: time.Now()},
+	})
+	suite.NoError(err)
+
+	wrappedCache := &failingSetCache{Database: suite.CacheClient}
+	suite.CacheClient = wrappedCache
+	defer func() {
+		suite.CacheClient = wrappedCache.Database
+	}()
+
+	// Fail only during the recommendation persistence step.
+	wrappedCache.failSet = true
+	suite.Recommend(ctx, []data.User{{UserId: "fp2"}}, nil)
+
+	_, ok := suite.recommendTimes.Load("fp2")
+	suite.False(ok)
+
+	// Scores may already have been written, but without persisted metadata the
+	// user must still be considered stale on the next cycle.
+	suite.True(suite.checkRecommendCacheOutOfDate(ctx, "fp2", suite.Config.Recommend.Hash()))
 }
 
 func (suite *WorkerTestSuite) TestRecommendCollaborative() {
