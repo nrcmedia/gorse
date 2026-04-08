@@ -106,8 +106,13 @@ func (p *Pipeline) Recommend(ctx context.Context, users []data.User, progress fu
 		}()
 		user := users[jobId]
 		userId := user.UserId
+		// Fetch active time once — used by both staleness checks.
+		activeTime, err := p.CacheClient.Get(ctx, cache.Key(cache.LastModifyUserTime, userId)).Time()
+		if err != nil {
+			log.Logger().Error("failed to read last modify user time", zap.String("user_id", userId), zap.Error(err))
+		}
 		// skip inactive users before max recommend period
-		if !p.checkUserActiveTime(ctx, userId) || !p.checkRecommendCacheOutOfDate(ctx, userId, configDigest) {
+		if !p.checkUserActiveTime(ctx, userId, activeTime) || !p.checkRecommendCacheOutOfDate(ctx, userId, configDigest, activeTime) {
 			return
 		}
 		updateUserCount.Add(1)
@@ -249,14 +254,8 @@ func (p *Pipeline) Recommend(ctx context.Context, users []data.User, progress fu
 }
 
 // checkUserActiveTime checks if a user is active based on their last modification time.
-func (p *Pipeline) checkUserActiveTime(ctx context.Context, userId string) bool {
+func (p *Pipeline) checkUserActiveTime(ctx context.Context, userId string, activeTime time.Time) bool {
 	if p.Config.Recommend.ActiveUserTTL == 0 {
-		return true
-	}
-	// read active time
-	activeTime, err := p.CacheClient.Get(ctx, cache.Key(cache.LastModifyUserTime, userId)).Time()
-	if err != nil {
-		log.Logger().Error("failed to read last modify user time", zap.String("user_id", userId), zap.Error(err))
 		return true
 	}
 	if activeTime.IsZero() {
@@ -276,7 +275,7 @@ func (p *Pipeline) checkUserActiveTime(ctx context.Context, userId string) bool 
 
 // checkRecommendCacheOutOfDate checks if recommend cache is stale.
 // Checks are ordered cheapest-first to avoid SearchScores on the common stale path.
-func (p *Pipeline) checkRecommendCacheOutOfDate(ctx context.Context, userId, configDigest string) bool {
+func (p *Pipeline) checkRecommendCacheOutOfDate(ctx context.Context, userId, configDigest string, activeTime time.Time) bool {
 	now := time.Now()
 
 	digest, err := p.CacheClient.Get(ctx, cache.Key(cache.RecommendDigest, userId)).String()
@@ -297,12 +296,6 @@ func (p *Pipeline) checkRecommendCacheOutOfDate(ctx context.Context, userId, con
 		return true
 	}
 
-	// Read errors are not fatal: a missing active time means the user has no recorded
-	// activity, so zero time compares as "before recommendTime" and falls through.
-	activeTime, err := p.CacheClient.Get(ctx, cache.Key(cache.LastModifyUserTime, userId)).Time()
-	if err != nil {
-		log.Logger().Error("failed to read last modify user time", zap.String("user_id", userId), zap.Error(err))
-	}
 	if !activeTime.Before(recommendTime) {
 		return true
 	}
