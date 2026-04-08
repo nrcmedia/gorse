@@ -366,6 +366,7 @@ type RankerConfig struct {
 	CacheExpire      time.Duration       `mapstructure:"cache_expire" validate:"gt=0"`
 	FitPeriod        time.Duration       `mapstructure:"fit_period" validate:"gt=0"`
 	FitEpoch         int                 `mapstructure:"fit_epoch" validate:"gt=0"`
+	FitVerbose       int                 `mapstructure:"fit_verbose" validate:"gt=0"`
 	OptimizePeriod   time.Duration       `mapstructure:"optimize_period" validate:"gte=0"`
 	OptimizeTrials   int                 `mapstructure:"optimize_trials" validate:"gt=0"`
 	QueryTemplate    string              `mapstructure:"query_template"`
@@ -495,6 +496,7 @@ func GetDefaultConfig() *Config {
 				CacheExpire:    120 * time.Hour,
 				FitPeriod:      60 * time.Minute,
 				FitEpoch:       100,
+				FitVerbose:     10,
 				OptimizePeriod: 0,
 				OptimizeTrials: 10,
 				Recommenders:   []string{"latest"},
@@ -630,6 +632,7 @@ func setDefault() {
 	viper.SetDefault("recommend.ranker.cache_expire", defaultConfig.Recommend.Ranker.CacheExpire)
 	viper.SetDefault("recommend.ranker.fit_period", defaultConfig.Recommend.Ranker.FitPeriod)
 	viper.SetDefault("recommend.ranker.fit_epoch", defaultConfig.Recommend.Ranker.FitEpoch)
+	viper.SetDefault("recommend.ranker.fit_verbose", defaultConfig.Recommend.Ranker.FitVerbose)
 	viper.SetDefault("recommend.ranker.optimize_period", defaultConfig.Recommend.Ranker.OptimizePeriod)
 	viper.SetDefault("recommend.ranker.optimize_trials", defaultConfig.Recommend.Ranker.OptimizeTrials)
 	viper.SetDefault("recommend.ranker.recommenders", defaultConfig.Recommend.Ranker.Recommenders)
