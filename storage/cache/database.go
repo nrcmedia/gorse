@@ -125,6 +125,15 @@ type ReturnValue struct {
 	exists bool
 }
 
+// errorReturnValues returns a slice of n ReturnValues each carrying err.
+func errorReturnValues(n int, err error) []*ReturnValue {
+	results := make([]*ReturnValue, n)
+	for i := range results {
+		results[i] = &ReturnValue{err: err, exists: false}
+	}
+	return results
+}
+
 func (r *ReturnValue) String() (string, error) {
 	if r.err != nil {
 		return "", r.err

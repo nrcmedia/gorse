@@ -317,11 +317,7 @@ func (db *SQLDatabase) GetValues(ctx context.Context, names ...string) []*Return
 		Select("name", "value").
 		Find(&rows).Error
 	if err != nil {
-		results := make([]*ReturnValue, len(names))
-		for i := range results {
-			results[i] = &ReturnValue{err: errors.Trace(err), exists: false}
-		}
-		return results
+		return errorReturnValues(len(names), errors.Trace(err))
 	}
 	values := make(map[string]string, len(rows))
 	for _, row := range rows {

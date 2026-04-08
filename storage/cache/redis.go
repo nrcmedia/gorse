@@ -230,13 +230,10 @@ func (r *Redis) GetValues(ctx context.Context, keys ...string) []*ReturnValue {
 		redisKeys[i] = r.Key(key)
 	}
 	values, err := r.client.MGet(ctx, redisKeys...).Result()
-	results := make([]*ReturnValue, len(keys))
 	if err != nil {
-		for i := range results {
-			results[i] = &ReturnValue{err: err, exists: false}
-		}
-		return results
+		return errorReturnValues(len(keys), err)
 	}
+	results := make([]*ReturnValue, len(keys))
 	for i, value := range values {
 		if value == nil {
 			results[i] = &ReturnValue{value: "", exists: false}

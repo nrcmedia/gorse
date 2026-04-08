@@ -213,11 +213,7 @@ func (m MongoDB) GetValues(ctx context.Context, names ...string) []*ReturnValue 
 	c := m.client.Database(m.dbName).Collection(m.ValuesTable())
 	cursor, err := c.Find(ctx, bson.M{"_id": bson.M{"$in": names}})
 	if err != nil {
-		results := make([]*ReturnValue, len(names))
-		for i := range results {
-			results[i] = &ReturnValue{err: errors.Trace(err), exists: false}
-		}
-		return results
+		return errorReturnValues(len(names), errors.Trace(err))
 	}
 	defer cursor.Close(ctx)
 	values := make(map[string]string, len(names))
@@ -227,20 +223,12 @@ func (m MongoDB) GetValues(ctx context.Context, names ...string) []*ReturnValue 
 			Value string `bson:"value"`
 		}
 		if err = cursor.Decode(&row); err != nil {
-			results := make([]*ReturnValue, len(names))
-			for i := range results {
-				results[i] = &ReturnValue{err: errors.Trace(err), exists: false}
-			}
-			return results
+			return errorReturnValues(len(names), errors.Trace(err))
 		}
 		values[row.Name] = row.Value
 	}
 	if err = cursor.Err(); err != nil {
-		results := make([]*ReturnValue, len(names))
-		for i := range results {
-			results[i] = &ReturnValue{err: errors.Trace(err), exists: false}
-		}
-		return results
+		return errorReturnValues(len(names), errors.Trace(err))
 	}
 	results := make([]*ReturnValue, len(names))
 	for i, name := range names {

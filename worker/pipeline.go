@@ -47,7 +47,7 @@ type Pipeline struct {
 	MatrixFactorizationUsers *logics.MatrixFactorizationUsers
 	ClickThroughRateModel    ctr.FactorizationMachines
 	dontskipColdStartUsers   bool
-	freshnessMu              sync.Mutex
+	freshnessMu              sync.RWMutex
 	recommendTimes           map[string]time.Time
 	lastDigest               string
 }
@@ -300,11 +300,8 @@ func (p *Pipeline) resetFreshnessCache(configDigest string) {
 }
 
 func (p *Pipeline) loadRecommendTime(userId string) (time.Time, bool) {
-	p.freshnessMu.Lock()
-	defer p.freshnessMu.Unlock()
-	if p.recommendTimes == nil {
-		return time.Time{}, false
-	}
+	p.freshnessMu.RLock()
+	defer p.freshnessMu.RUnlock()
 	recommendTime, ok := p.recommendTimes[userId]
 	return recommendTime, ok
 }
@@ -312,9 +309,6 @@ func (p *Pipeline) loadRecommendTime(userId string) (time.Time, bool) {
 func (p *Pipeline) storeRecommendTime(userId string, recommendTime time.Time) {
 	p.freshnessMu.Lock()
 	defer p.freshnessMu.Unlock()
-	if p.recommendTimes == nil {
-		p.recommendTimes = make(map[string]time.Time)
-	}
 	p.recommendTimes[userId] = recommendTime
 }
 
