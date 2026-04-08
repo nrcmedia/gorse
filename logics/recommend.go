@@ -17,6 +17,7 @@ package logics
 import (
 	"context"
 	"strings"
+	"sync"
 	"time"
 
 	mapset "github.com/deckarep/golang-set/v2"
@@ -303,17 +304,31 @@ func (r *Recommender) recommendUserToUser(name string) RecommenderFunc {
 		if err != nil {
 			return nil, "", errors.Trace(err)
 		}
+		// Fetch all similar users' feedback concurrently.
+		type feedbackResult struct {
+			score     float64
+			feedbacks []data.Feedback
+			err       error
+		}
+		fbResults := make([]feedbackResult, len(similarUsers))
+		var wg sync.WaitGroup
+		for i, user := range similarUsers {
+			wg.Add(1)
+			go func(i int, user cache.Score) {
+				defer wg.Done()
+				feedbacks, err := r.dataClient.GetUserFeedback(ctx, user.Id, lo.ToPtr(time.Now()), r.config.DataSource.PositiveFeedbackTypes...)
+				fbResults[i] = feedbackResult{score: user.Score, feedbacks: feedbacks, err: err}
+			}(i, user)
+		}
+		wg.Wait()
 		// aggregate scores
-		for _, user := range similarUsers {
-			// load historical feedback
-			feedbacks, err := r.dataClient.GetUserFeedback(ctx, user.Id, lo.ToPtr(time.Now()), r.config.DataSource.PositiveFeedbackTypes...)
-			if err != nil {
-				return nil, "", errors.Trace(err)
+		for _, res := range fbResults {
+			if res.err != nil {
+				return nil, "", errors.Trace(res.err)
 			}
-			// add unseen items
-			for _, feedback := range feedbacks {
+			for _, feedback := range res.feedbacks {
 				if !r.excludeSet.Contains(feedback.ItemId) {
-					scores[feedback.ItemId] += user.Score
+					scores[feedback.ItemId] += res.score
 				}
 			}
 		}
