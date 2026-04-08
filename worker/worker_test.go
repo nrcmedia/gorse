@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -52,6 +53,18 @@ import (
 type WorkerTestSuite struct {
 	suite.Suite
 	Worker
+}
+
+type failingSetCache struct {
+	cache.Database
+	failSet bool
+}
+
+func (c *failingSetCache) Set(ctx context.Context, values ...cache.Value) error {
+	if c.failSet {
+		return assert.AnError
+	}
+	return c.Database.Set(ctx, values...)
 }
 
 func (suite *WorkerTestSuite) SetupSuite() {
@@ -93,6 +106,8 @@ func (suite *WorkerTestSuite) SetupTest() {
 	// reset index
 	suite.MatrixFactorizationItems = nil
 	suite.ClickThroughRateModel = nil
+	suite.recommendTimes = sync.Map{}
+	suite.lastDigest = ""
 }
 
 func (suite *WorkerTestSuite) TestPullUsers() {
@@ -214,35 +229,31 @@ func (suite *WorkerTestSuite) TestFastPathScoresDeleted() {
 }
 
 func (suite *WorkerTestSuite) TestInMemoryNotStoredOnPersistFailure() {
-	// Verify that recommendTimes is NOT populated when CacheClient.Set fails.
-	// We simulate this indirectly: close the cache DB so Set returns an error,
-	// then confirm the in-memory map was not updated.
 	ctx := context.Background()
-	configDigest := suite.Config.Recommend.Hash()
+	suite.Config.Recommend.Ranker.Recommenders = []string{"latest"}
+	suite.Config.Recommend.Fallback.Recommenders = nil
 
-	// Pre-populate a user so the in-memory entry exists, then remove it.
-	suite.recommendTimes.Delete("fp2")
-
-	// Store valid metadata and scores, then confirm fresh.
-	recommendTime := time.Now().Add(-time.Minute)
-	err := suite.CacheClient.Set(ctx,
-		cache.String(cache.Key(cache.RecommendDigest, "fp2"), configDigest),
-		cache.Time(cache.Key(cache.RecommendUpdateTime, "fp2"), recommendTime),
-		cache.Time(cache.Key(cache.LastModifyUserTime, "fp2"), recommendTime.Add(-time.Hour)),
-	)
-	suite.NoError(err)
-	err = suite.CacheClient.AddScores(ctx, cache.Recommend, "fp2", []cache.Score{{Id: "i1", Score: 1, Categories: []string{""}}})
+	err := suite.DataClient.BatchInsertItems(ctx, []data.Item{
+		{ItemId: "persist_item", Timestamp: time.Now()},
+	})
 	suite.NoError(err)
 
-	// Manually store into the in-memory map (simulating a successful prior cycle).
-	suite.recommendTimes.Store("fp2", recommendTime)
-	suite.False(suite.checkRecommendCacheOutOfDate(ctx, "fp2", configDigest))
+	wrappedCache := &failingSetCache{Database: suite.CacheClient}
+	suite.CacheClient = wrappedCache
+	defer func() {
+		suite.CacheClient = wrappedCache.Database
+	}()
 
-	// Now verify the guard: if we never stored into recommendTimes,
-	// the slow path would be used instead. Remove the entry and confirm
-	// the slow path still works correctly (not-stale via DB metadata).
-	suite.recommendTimes.Delete("fp2")
-	suite.False(suite.checkRecommendCacheOutOfDate(ctx, "fp2", configDigest))
+	// Fail only during the recommendation persistence step.
+	wrappedCache.failSet = true
+	suite.Recommend(ctx, []data.User{{UserId: "fp2"}}, nil)
+
+	_, ok := suite.recommendTimes.Load("fp2")
+	suite.False(ok)
+
+	// Scores may already have been written, but without persisted metadata the
+	// user must still be considered stale on the next cycle.
+	suite.True(suite.checkRecommendCacheOutOfDate(ctx, "fp2", suite.Config.Recommend.Hash()))
 }
 
 func (suite *WorkerTestSuite) TestRecommendCollaborative() {
