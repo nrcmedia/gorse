@@ -250,24 +250,38 @@ func (r *Recommender) recommendItemToItem(name string) RecommenderFunc {
 				userFeedback = append(userFeedback, feedback)
 			}
 		}
+		type itemToItemResult struct {
+			similarItems []cache.Score
+			digest       string
+		}
+		itemToItemResults := make([]itemToItemResult, len(userFeedback))
+		if err := parallel.Parallel(ctx, len(userFeedback), min(len(userFeedback), 8), func(_, jobId int) error {
+			similarItems, err := r.cacheClient.SearchScores(ctx, cache.ItemToItem, cache.Key(name, userFeedback[jobId].ItemId), r.categories, 0, r.config.CacheSize)
+			if err != nil {
+				return errors.Trace(err)
+			}
+			digest, err := r.cacheClient.Get(ctx, cache.Key(cache.ItemToItemDigest, name, userFeedback[jobId].ItemId)).String()
+			if err != nil {
+				return errors.Trace(err)
+			}
+			itemToItemResults[jobId] = itemToItemResult{
+				similarItems: similarItems,
+				digest:       digest,
+			}
+			return nil
+		}); err != nil {
+			return nil, "", errors.Trace(err)
+		}
 		// collect scores
 		scores := make(map[string]float64)
 		categories := make(map[string][]string)
 		digests := mapset.NewSet[string]()
-		for _, feedback := range userFeedback {
-			similarItems, err := r.cacheClient.SearchScores(ctx, cache.ItemToItem, cache.Key(name, feedback.ItemId), r.categories, 0, r.config.CacheSize)
-			if err != nil {
-				return nil, "", errors.Trace(err)
-			}
-			digest, err := r.cacheClient.Get(ctx, cache.Key(cache.ItemToItemDigest, name, feedback.ItemId)).String()
-			if err != nil {
-				return nil, "", errors.Trace(err)
-			}
-			for _, item := range similarItems {
+		for _, result := range itemToItemResults {
+			for _, item := range result.similarItems {
 				if !r.excludeSet.Contains(item.Id) {
 					scores[item.Id] += item.Score
 					categories[item.Id] = item.Categories
-					digests.Add(digest)
+					digests.Add(result.digest)
 				}
 			}
 		}

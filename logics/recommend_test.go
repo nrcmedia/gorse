@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gorse-io/gorse/common/expression"
 	"github.com/gorse-io/gorse/config"
 	"github.com/gorse-io/gorse/storage/cache"
 	"github.com/gorse-io/gorse/storage/data"
@@ -52,6 +53,13 @@ func (suite *RecommenderTestSuite) TearDownSuite() {
 	err := suite.dataClient.Close()
 	suite.NoError(err)
 	err = suite.cacheClient.Close()
+	suite.NoError(err)
+}
+
+func (suite *RecommenderTestSuite) SetupTest() {
+	err := suite.dataClient.Purge()
+	suite.NoError(err)
+	err = suite.cacheClient.Purge()
 	suite.NoError(err)
 }
 
@@ -217,6 +225,60 @@ func (suite *RecommenderTestSuite) TestNonPersonalized() {
 			suite.Equal(float64(18-2*i), scores[i].Score)
 		}
 	}
+}
+
+func (suite *RecommenderTestSuite) TestItemToItem() {
+	cfg := config.RecommendConfig{
+		CacheSize: 10,
+		ContextSize: 10,
+		DataSource: config.DataSourceConfig{
+			PositiveFeedbackTypes: []expression.FeedbackTypeExpression{
+				expression.MustParseFeedbackTypeExpression("click"),
+			},
+		},
+	}
+	err := suite.dataClient.BatchInsertFeedback(context.Background(), []data.Feedback{
+		{FeedbackKey: data.FeedbackKey{FeedbackType: "click", UserId: "item_user", ItemId: "seed_1"}},
+		{FeedbackKey: data.FeedbackKey{FeedbackType: "click", UserId: "item_user", ItemId: "seed_2"}},
+	}, true, true, false)
+	suite.NoError(err)
+	err = suite.cacheClient.AddScores(context.Background(), cache.ItemToItem, cache.Key("default", "seed_1"), []cache.Score{
+		{Id: "seed_2", Score: 100},
+		{Id: "candidate_3", Score: 10},
+		{Id: "candidate_4", Score: 1, Categories: []string{"cat_1"}},
+	})
+	suite.NoError(err)
+	err = suite.cacheClient.AddScores(context.Background(), cache.ItemToItem, cache.Key("default", "seed_2"), []cache.Score{
+		{Id: "candidate_3", Score: 20},
+		{Id: "candidate_4", Score: 2, Categories: []string{"cat_1"}},
+	})
+	suite.NoError(err)
+	err = suite.cacheClient.Set(
+		context.Background(),
+		cache.String(cache.Key(cache.ItemToItemDigest, "default", "seed_1"), "digest-1"),
+		cache.String(cache.Key(cache.ItemToItemDigest, "default", "seed_2"), "digest-2"),
+	)
+	suite.NoError(err)
+
+	recommender, err := NewRecommender(cfg, suite.cacheClient, suite.dataClient, true, "item_user", nil, nil)
+	suite.NoError(err)
+	recommendFunc := recommender.recommendItemToItem("default")
+	scores, digest, err := recommendFunc(context.Background())
+	suite.NoError(err)
+	suite.Equal([]cache.Score{
+		{Id: "candidate_3", Score: 30},
+		{Id: "candidate_4", Score: 3, Categories: []string{"cat_1"}},
+	}, scores)
+	suite.Contains([]string{"digest-1digest-2", "digest-2digest-1"}, digest)
+
+	recommender, err = NewRecommender(cfg, suite.cacheClient, suite.dataClient, true, "item_user", []string{"cat_1"}, nil)
+	suite.NoError(err)
+	recommendFunc = recommender.recommendItemToItem("default")
+	scores, _, err = recommendFunc(context.Background())
+	suite.NoError(err)
+	suite.Equal([]cache.Score{
+		{Id: "candidate_4", Score: 3, Categories: []string{"cat_1"}},
+	}, scores)
 }
 
 func (suite *RecommenderTestSuite) TestExternal() {
