@@ -138,6 +138,7 @@ func TestUnmarshal(t *testing.T) {
 			assert.Equal(t, []string{"latest", "collaborative", "non-personalized/most_starred_weekly", "item-to-item/neighbors", "user-to-user/neighbors"}, config.Recommend.Ranker.Recommenders)
 			assert.Equal(t, 60*time.Minute, config.Recommend.Ranker.FitPeriod)
 			assert.Equal(t, 100, config.Recommend.Ranker.FitEpoch)
+			assert.Equal(t, 10, config.Recommend.Ranker.FitVerbose)
 			assert.Equal(t, 360*time.Minute, config.Recommend.Ranker.OptimizePeriod)
 			assert.Equal(t, 10, config.Recommend.Ranker.OptimizeTrials)
 			assert.Equal(t, "<reranker_auth_token>", config.Recommend.Ranker.RerankerAPI.AuthToken)

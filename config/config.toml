@@ -271,6 +271,10 @@ fit_period = "60m"
 # The number of epochs for model fitting. The default value is 100.
 fit_epoch = 100
 
+# The number of epochs between evaluations during model fitting. Controls both logging
+# frequency and early stopping checks. The default value is 10.
+fit_verbose = 10
+
 # The time period for hyperparameter optimization, set to 0 to disable. The default value is "0".
 optimize_period = "360m"
 
