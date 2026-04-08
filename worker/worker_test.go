@@ -223,6 +223,7 @@ func (suite *WorkerTestSuite) TestCheckRecommendCacheTimeout() {
 func (suite *WorkerTestSuite) TestFastPathScoresDeleted() {
 	ctx := context.Background()
 	configDigest := suite.Config.Recommend.Hash()
+	suite.resetFreshnessCache(configDigest)
 
 	// Set up a user with valid metadata and an in-memory freshness entry.
 	recommendTime := time.Now().Add(-time.Minute)
