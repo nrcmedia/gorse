@@ -250,8 +250,9 @@ func (p *Pipeline) Recommend(ctx context.Context, users []data.User, progress fu
 			cache.String(cache.Key(cache.RecommendDigest, userId), digest),
 		); err != nil {
 			log.Logger().Error("failed to cache recommendation time", zap.Error(err))
+		} else {
+			p.recommendTimes.Store(userId, recommendTime)
 		}
-		p.recommendTimes.Store(userId, recommendTime)
 	}); err != nil {
 		log.Logger().Error("recommendation was cancelled", zap.Error(err))
 	}
@@ -299,14 +300,20 @@ func (p *Pipeline) checkRecommendCacheOutOfDate(ctx context.Context, userId, con
 	now := time.Now()
 
 	// Fast path: if we have an in-memory recommend time within the cache TTL,
-	// skip the expensive SearchScores + digest checks. We still check user
-	// activity so that active users get re-recommended promptly.
+	// skip the expensive digest checks. We still check user activity so that
+	// active users get re-recommended promptly, and verify that at least one
+	// cached score exists (guards against deleted/missing recommendation rows).
 	if rt, ok := p.recommendTimes.Load(userId); ok {
 		recommendTime := rt.(time.Time)
 		freshnessTTL := min(p.Config.Recommend.CacheExpire, p.Config.Recommend.Ranker.CacheExpire)
 		if time.Since(recommendTime) < freshnessTTL {
 			activeTime, err := p.CacheClient.Get(ctx, cache.Key(cache.LastModifyUserTime, userId)).Time()
 			if err == nil && activeTime.After(recommendTime) {
+				return true
+			}
+			// Verify scores actually exist before trusting the fast path.
+			items, err := p.CacheClient.SearchScores(ctx, cache.Recommend, userId, nil, 0, 1)
+			if err != nil || len(items) == 0 {
 				return true
 			}
 			return false

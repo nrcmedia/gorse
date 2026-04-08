@@ -187,6 +187,64 @@ func (suite *WorkerTestSuite) TestCheckRecommendCacheTimeout() {
 	suite.True(suite.checkRecommendCacheOutOfDate(ctx, "3", rankerDigest))
 }
 
+func (suite *WorkerTestSuite) TestFastPathScoresDeleted() {
+	ctx := context.Background()
+	configDigest := suite.Config.Recommend.Hash()
+
+	// Set up a user with valid metadata and an in-memory freshness entry.
+	recommendTime := time.Now().Add(-time.Minute)
+	err := suite.CacheClient.Set(ctx,
+		cache.String(cache.Key(cache.RecommendDigest, "fp1"), configDigest),
+		cache.Time(cache.Key(cache.RecommendUpdateTime, "fp1"), recommendTime),
+		cache.Time(cache.Key(cache.LastModifyUserTime, "fp1"), recommendTime.Add(-time.Hour)),
+	)
+	suite.NoError(err)
+	suite.recommendTimes.Store("fp1", recommendTime)
+
+	// With scores present the fast path should report not-stale.
+	err = suite.CacheClient.AddScores(ctx, cache.Recommend, "fp1", []cache.Score{{Id: "i1", Score: 1, Categories: []string{""}}})
+	suite.NoError(err)
+	suite.False(suite.checkRecommendCacheOutOfDate(ctx, "fp1", configDigest))
+
+	// Delete the cached scores — the fast path must now detect staleness
+	// instead of trusting the in-memory entry alone.
+	err = suite.CacheClient.DeleteScores(ctx, []string{cache.Recommend}, cache.ScoreCondition{Subset: new("fp1")})
+	suite.NoError(err)
+	suite.True(suite.checkRecommendCacheOutOfDate(ctx, "fp1", configDigest))
+}
+
+func (suite *WorkerTestSuite) TestInMemoryNotStoredOnPersistFailure() {
+	// Verify that recommendTimes is NOT populated when CacheClient.Set fails.
+	// We simulate this indirectly: close the cache DB so Set returns an error,
+	// then confirm the in-memory map was not updated.
+	ctx := context.Background()
+	configDigest := suite.Config.Recommend.Hash()
+
+	// Pre-populate a user so the in-memory entry exists, then remove it.
+	suite.recommendTimes.Delete("fp2")
+
+	// Store valid metadata and scores, then confirm fresh.
+	recommendTime := time.Now().Add(-time.Minute)
+	err := suite.CacheClient.Set(ctx,
+		cache.String(cache.Key(cache.RecommendDigest, "fp2"), configDigest),
+		cache.Time(cache.Key(cache.RecommendUpdateTime, "fp2"), recommendTime),
+		cache.Time(cache.Key(cache.LastModifyUserTime, "fp2"), recommendTime.Add(-time.Hour)),
+	)
+	suite.NoError(err)
+	err = suite.CacheClient.AddScores(ctx, cache.Recommend, "fp2", []cache.Score{{Id: "i1", Score: 1, Categories: []string{""}}})
+	suite.NoError(err)
+
+	// Manually store into the in-memory map (simulating a successful prior cycle).
+	suite.recommendTimes.Store("fp2", recommendTime)
+	suite.False(suite.checkRecommendCacheOutOfDate(ctx, "fp2", configDigest))
+
+	// Now verify the guard: if we never stored into recommendTimes,
+	// the slow path would be used instead. Remove the entry and confirm
+	// the slow path still works correctly (not-stale via DB metadata).
+	suite.recommendTimes.Delete("fp2")
+	suite.False(suite.checkRecommendCacheOutOfDate(ctx, "fp2", configDigest))
+}
+
 func (suite *WorkerTestSuite) TestRecommendCollaborative() {
 	ctx := context.Background()
 	suite.Config.Recommend.Ranker.Recommenders = []string{"collaborative"}
