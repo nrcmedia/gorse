@@ -17,12 +17,12 @@ package logics
 import (
 	"context"
 	"strings"
-	"sync"
 	"time"
 
 	mapset "github.com/deckarep/golang-set/v2"
 	"github.com/gorse-io/gorse/common/expression"
 	"github.com/gorse-io/gorse/common/heap"
+	"github.com/gorse-io/gorse/common/parallel"
 	"github.com/gorse-io/gorse/common/util"
 	"github.com/gorse-io/gorse/config"
 	"github.com/gorse-io/gorse/storage/cache"
@@ -51,12 +51,12 @@ type Recommender struct {
 	userFeedback []data.Feedback
 	categories   []string
 	excludeSet   mapset.Set[string]
-	latestItems  []data.Item // pre-fetched per-cycle, shared across users
+	latestItems  []data.Item
 }
 
 type RecommenderFunc func(ctx context.Context) ([]cache.Score, string, error)
 
-func NewRecommender(config config.RecommendConfig, cacheClient cache.Database, dataClient data.Database, online bool, userId string, categories []string) (*Recommender, error) {
+func NewRecommender(config config.RecommendConfig, cacheClient cache.Database, dataClient data.Database, online bool, userId string, categories []string, latestItems []data.Item) (*Recommender, error) {
 	// Load user feedback
 	userFeedback, err := dataClient.GetUserFeedback(context.Background(), userId, lo.ToPtr(time.Now()))
 	if err != nil {
@@ -82,6 +82,7 @@ func NewRecommender(config config.RecommendConfig, cacheClient cache.Database, d
 		coldstart:    coldstart,
 		categories:   categories,
 		excludeSet:   excludeSet,
+		latestItems:  latestItems,
 	}, nil
 }
 
@@ -95,11 +96,6 @@ func (r *Recommender) UserFeedback() []data.Feedback {
 
 func (r *Recommender) IsColdStart() bool {
 	return r.coldstart
-}
-
-// SetLatestItems injects pre-fetched latest items to avoid redundant DB queries.
-func (r *Recommender) SetLatestItems(items []data.Item) {
-	r.latestItems = items
 }
 
 func (r *Recommender) Recommend(ctx context.Context, limit int) (result []cache.Score, err error) {
@@ -305,30 +301,22 @@ func (r *Recommender) recommendUserToUser(name string) RecommenderFunc {
 			return nil, "", errors.Trace(err)
 		}
 		// Fetch all similar users' feedback concurrently.
-		type feedbackResult struct {
-			score     float64
-			feedbacks []data.Feedback
-			err       error
-		}
-		fbResults := make([]feedbackResult, len(similarUsers))
-		var wg sync.WaitGroup
-		for i, user := range similarUsers {
-			wg.Add(1)
-			go func(i int, user cache.Score) {
-				defer wg.Done()
-				feedbacks, err := r.dataClient.GetUserFeedback(ctx, user.Id, lo.ToPtr(time.Now()), r.config.DataSource.PositiveFeedbackTypes...)
-				fbResults[i] = feedbackResult{score: user.Score, feedbacks: feedbacks, err: err}
-			}(i, user)
-		}
-		wg.Wait()
-		// aggregate scores
-		for _, res := range fbResults {
-			if res.err != nil {
-				return nil, "", errors.Trace(res.err)
+		userFeedbacks := make([][]data.Feedback, len(similarUsers))
+		if err := parallel.Parallel(ctx, len(similarUsers), len(similarUsers), func(_, jobId int) error {
+			feedbacks, err := r.dataClient.GetUserFeedback(ctx, similarUsers[jobId].Id, lo.ToPtr(time.Now()), r.config.DataSource.PositiveFeedbackTypes...)
+			if err != nil {
+				return errors.Trace(err)
 			}
-			for _, feedback := range res.feedbacks {
+			userFeedbacks[jobId] = feedbacks
+			return nil
+		}); err != nil {
+			return nil, "", errors.Trace(err)
+		}
+		// aggregate scores
+		for i, feedbacks := range userFeedbacks {
+			for _, feedback := range feedbacks {
 				if !r.excludeSet.Contains(feedback.ItemId) {
-					scores[feedback.ItemId] += res.score
+					scores[feedback.ItemId] += similarUsers[i].Score
 				}
 			}
 		}
