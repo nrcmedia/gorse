@@ -53,6 +53,11 @@ func (p *Pipeline) Recommend(ctx context.Context, users []data.User, progress fu
 	startRecommendTime := time.Now()
 	itemCache := NewItemCache(p.DataClient)
 	configDigest := p.Config.Recommend.Hash()
+	// Pre-fetch latest items once per cycle — identical for all users.
+	latestItems, err := p.DataClient.GetLatestItems(ctx, p.Config.Recommend.CacheSize, nil)
+	if err != nil {
+		log.Logger().Error("failed to pre-fetch latest items", zap.Error(err))
+	}
 	log.Logger().Info("ranking recommendation",
 		zap.Int("n_working_users", len(users)),
 		zap.Int("n_jobs", p.Jobs),
@@ -123,6 +128,7 @@ func (p *Pipeline) Recommend(ctx context.Context, users []data.User, progress fu
 			log.Logger().Error("failed to create recommender", zap.String("user_id", userId), zap.Error(err))
 			return
 		}
+		recommender.SetLatestItems(latestItems)
 		if !p.dontskipColdStartUsers && recommender.IsColdStart() {
 			// skip cold-start users without any positive feedback
 			return

@@ -50,6 +50,7 @@ type Recommender struct {
 	userFeedback []data.Feedback
 	categories   []string
 	excludeSet   mapset.Set[string]
+	latestItems  []data.Item // pre-fetched per-cycle, shared across users
 }
 
 type RecommenderFunc func(ctx context.Context) ([]cache.Score, string, error)
@@ -93,6 +94,11 @@ func (r *Recommender) UserFeedback() []data.Feedback {
 
 func (r *Recommender) IsColdStart() bool {
 	return r.coldstart
+}
+
+// SetLatestItems injects pre-fetched latest items to avoid redundant DB queries.
+func (r *Recommender) SetLatestItems(items []data.Item) {
+	r.latestItems = items
 }
 
 func (r *Recommender) Recommend(ctx context.Context, limit int) (result []cache.Score, err error) {
@@ -169,9 +175,15 @@ func (r *Recommender) parse(fullname string) (RecommenderFunc, error) {
 }
 
 func (r *Recommender) recommendLatest(ctx context.Context) ([]cache.Score, string, error) {
-	items, err := r.dataClient.GetLatestItems(ctx, r.config.CacheSize, r.categories)
-	if err != nil {
-		return nil, "", errors.Trace(err)
+	var items []data.Item
+	if r.latestItems != nil && len(r.categories) == 0 {
+		items = r.latestItems
+	} else {
+		var err error
+		items, err = r.dataClient.GetLatestItems(ctx, r.config.CacheSize, r.categories)
+		if err != nil {
+			return nil, "", errors.Trace(err)
+		}
 	}
 	scores := make([]cache.Score, 0, len(items))
 	for _, item := range items {
