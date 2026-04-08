@@ -76,7 +76,7 @@ func (parameters Params) GetBool(name ParamName, _default bool) bool {
 		default:
 			log.Logger().Error("type mismatch",
 				zap.String("param_name", string(name)),
-				zap.String("actual_type", reflect.TypeOf(name).Name()))
+				zap.String("actual_type", reflect.TypeOf(val).Name()))
 		}
 	}
 	return _default
@@ -93,7 +93,7 @@ func (parameters Params) GetInt(name ParamName, _default int) int {
 		default:
 			log.Logger().Error("type mismatch",
 				zap.String("param_name", string(name)),
-				zap.String("actual_type", reflect.TypeOf(name).Name()))
+				zap.String("actual_type", reflect.TypeOf(val).Name()))
 		}
 	}
 	return _default
@@ -113,7 +113,7 @@ func (parameters Params) GetInt64(name ParamName, _default int64) int64 {
 		default:
 			log.Logger().Error("type mismatch",
 				zap.String("param_name", string(name)),
-				zap.String("actual_type", reflect.TypeOf(name).Name()))
+				zap.String("actual_type", reflect.TypeOf(val).Name()))
 		}
 	}
 	return _default
@@ -131,7 +131,7 @@ func (parameters Params) GetFloat32(name ParamName, _default float32) float32 {
 		default:
 			log.Logger().Error("type mismatch",
 				zap.String("param_name", string(name)),
-				zap.String("actual_type", reflect.TypeOf(name).Name()))
+				zap.String("actual_type", reflect.TypeOf(val).Name()))
 		}
 	}
 	return _default
@@ -153,7 +153,7 @@ func (parameters Params) GetIntSlice(name ParamName, _default []int) []int {
 		default:
 			log.Logger().Error("type mismatch",
 				zap.String("param_name", string(name)),
-				zap.String("actual_type", reflect.TypeOf(name).Name()))
+				zap.String("actual_type", reflect.TypeOf(val).Name()))
 		}
 	}
 	return _default
