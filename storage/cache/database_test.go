@@ -105,6 +105,34 @@ func (suite *baseTestSuite) TestMeta() {
 	suite.NoError(err)
 }
 
+func (suite *baseTestSuite) TestGetValues() {
+	ctx := context.Background()
+	err := suite.Database.Set(
+		ctx,
+		String(Key("meta", "1"), "one"),
+		Integer(Key("meta", "2"), 2),
+	)
+	suite.NoError(err)
+
+	values := suite.Database.GetValues(ctx, Key("meta", "1"), Key("meta", "missing"), Key("meta", "2"))
+	if suite.Len(values, 3) {
+		value, err := values[0].String()
+		suite.NoError(err)
+		suite.True(values[0].Exists())
+		suite.Equal("one", value)
+
+		value, err = values[1].String()
+		suite.NoError(err)
+		suite.False(values[1].Exists())
+		suite.Equal("", value)
+
+		intValue, err := values[2].Integer()
+		suite.NoError(err)
+		suite.True(values[2].Exists())
+		suite.Equal(2, intValue)
+	}
+}
+
 func (suite *baseTestSuite) TestExists() {
 	ctx := context.Background()
 

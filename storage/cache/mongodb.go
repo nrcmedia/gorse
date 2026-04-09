@@ -206,6 +206,41 @@ func (m MongoDB) Get(ctx context.Context, name string) *ReturnValue {
 	}
 }
 
+func (m MongoDB) GetValues(ctx context.Context, names ...string) []*ReturnValue {
+	if len(names) == 0 {
+		return nil
+	}
+	c := m.client.Database(m.dbName).Collection(m.ValuesTable())
+	cursor, err := c.Find(ctx, bson.M{"_id": bson.M{"$in": names}})
+	if err != nil {
+		return errorReturnValues(len(names), errors.Trace(err))
+	}
+	defer cursor.Close(ctx)
+	values := make(map[string]string, len(names))
+	for cursor.Next(ctx) {
+		var row struct {
+			Name  string `bson:"_id"`
+			Value string `bson:"value"`
+		}
+		if err = cursor.Decode(&row); err != nil {
+			return errorReturnValues(len(names), errors.Trace(err))
+		}
+		values[row.Name] = row.Value
+	}
+	if err = cursor.Err(); err != nil {
+		return errorReturnValues(len(names), errors.Trace(err))
+	}
+	results := make([]*ReturnValue, len(names))
+	for i, name := range names {
+		if value, ok := values[name]; ok {
+			results[i] = &ReturnValue{value: value, exists: true}
+		} else {
+			results[i] = &ReturnValue{value: "", exists: false}
+		}
+	}
+	return results
+}
+
 func (m MongoDB) Delete(ctx context.Context, name string) error {
 	c := m.client.Database(m.dbName).Collection(m.ValuesTable())
 	_, err := c.DeleteOne(ctx, bson.M{"_id": bson.M{"$eq": name}})

@@ -125,6 +125,15 @@ type ReturnValue struct {
 	exists bool
 }
 
+// errorReturnValues returns a slice of n ReturnValues each carrying err.
+func errorReturnValues(n int, err error) []*ReturnValue {
+	results := make([]*ReturnValue, n)
+	for i := range results {
+		results[i] = &ReturnValue{err: err, exists: false}
+	}
+	return results
+}
+
 func (r *ReturnValue) String() (string, error) {
 	if r.err != nil {
 		return "", r.err
@@ -220,6 +229,7 @@ type Database interface {
 
 	Set(ctx context.Context, values ...Value) error
 	Get(ctx context.Context, name string) *ReturnValue
+	GetValues(ctx context.Context, names ...string) []*ReturnValue
 	Delete(ctx context.Context, name string) error
 
 	Push(ctx context.Context, name, value string) error

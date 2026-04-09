@@ -246,6 +246,14 @@ func (p ProxyClient) Get(ctx context.Context, name string) *ReturnValue {
 	return &ReturnValue{value: resp.GetValue(), err: err, exists: true}
 }
 
+func (p ProxyClient) GetValues(ctx context.Context, names ...string) []*ReturnValue {
+	values := make([]*ReturnValue, len(names))
+	for i, name := range names {
+		values[i] = p.Get(ctx, name)
+	}
+	return values
+}
+
 func (p ProxyClient) Delete(ctx context.Context, name string) error {
 	_, err := p.CacheStoreClient.Delete(ctx, &protocol.DeleteRequest{
 		Name: name,

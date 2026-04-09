@@ -221,6 +221,29 @@ func (r *Redis) Get(ctx context.Context, key string) *ReturnValue {
 	return &ReturnValue{value: val, exists: true}
 }
 
+func (r *Redis) GetValues(ctx context.Context, keys ...string) []*ReturnValue {
+	if len(keys) == 0 {
+		return nil
+	}
+	redisKeys := make([]string, len(keys))
+	for i, key := range keys {
+		redisKeys[i] = r.Key(key)
+	}
+	values, err := r.client.MGet(ctx, redisKeys...).Result()
+	if err != nil {
+		return errorReturnValues(len(keys), err)
+	}
+	results := make([]*ReturnValue, len(keys))
+	for i, value := range values {
+		if value == nil {
+			results[i] = &ReturnValue{value: "", exists: false}
+			continue
+		}
+		results[i] = &ReturnValue{value: value.(string), exists: true}
+	}
+	return results
+}
+
 // Delete object from Redis.
 func (r *Redis) Delete(ctx context.Context, key string) error {
 	return r.client.Del(ctx, r.Key(key)).Err()
