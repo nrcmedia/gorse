@@ -1067,7 +1067,28 @@ func (m *Master) trainClickThroughRatePrediction(parent context.Context, trainSe
 		clickThroughRateParams[model.NEpochs] = m.Config.Recommend.Ranker.FitEpoch
 	}
 	clickModel := ctr.NewAFM(clickThroughRateParams)
+	prevModelID := m.clickThroughRateMeta.ID
 	m.clickThroughRateModelMutex.Unlock()
+
+	// Warm-start: load previous model from blob storage (outside lock)
+	if prevModelID > 0 {
+		prevID := strconv.FormatInt(prevModelID, 10)
+		r, err := m.blobStore.Open(prevID)
+		if err != nil {
+			log.Logger().Warn("failed to load previous CTR model for warm-start", zap.Error(err))
+		} else {
+			prevModel, err := ctr.UnmarshalModel(r)
+			_ = r.Close()
+			if err != nil {
+				log.Logger().Warn("failed to unmarshal previous CTR model for warm-start", zap.Error(err))
+			} else if prevAFM, ok := prevModel.(*ctr.AFM); ok {
+				clickModel.SetWarmModel(prevAFM)
+				log.Logger().Info("loaded previous CTR model for warm-start", zap.String("id", prevID))
+			} else {
+				log.Logger().Warn("previous CTR model is not AFM, skipping warm-start")
+			}
+		}
+	}
 
 	startFitTime := time.Now()
 	score := clickModel.Fit(ctx, trainSet, testSet,
