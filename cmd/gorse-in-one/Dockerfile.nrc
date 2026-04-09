@@ -1,0 +1,47 @@
+# syntax = docker/dockerfile:1
+
+############################
+# STEP 1 build executable binary
+############################
+FROM --platform=$BUILDPLATFORM golang:1.26
+
+RUN apt-get update && apt-get install -y gcc libopenblas-dev git && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+
+COPY go.* ./
+
+RUN go mod download
+
+COPY . ./
+
+ARG TARGETOS
+
+ARG TARGETARCH
+
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    LDFLAGS=" \
+    -X 'github.com/gorse-io/gorse/cmd/version.Version=$(git describe --tags $(git rev-parse HEAD))' \
+    -X 'github.com/gorse-io/gorse/cmd/version.GitCommit=$(git rev-parse HEAD)' \
+    -X 'github.com/gorse-io/gorse/cmd/version.BuildTime=$(date)' \
+    -X 'github.com/gorse-io/gorse/config.RootDir=/var/lib/gorse'" && \
+    cd cmd/gorse-in-one && \
+    GOOS=${TARGETOS} GOARCH=${TARGETARCH} CGO_ENABLED=1 go build -tags openblas -ldflags="$LDFLAGS" . && \
+    mv gorse-in-one /usr/bin && \
+    cd ../gorse-optimize && \
+    GOOS=${TARGETOS} GOARCH=${TARGETARCH} CGO_ENABLED=1 go build -tags openblas -ldflags="$LDFLAGS" . && \
+    mv gorse-optimize /usr/bin
+
+############################
+# STEP 2 build a small image
+############################
+FROM debian:trixie-slim
+
+RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
+
+COPY --from=0 /usr/bin/gorse-in-one /usr/bin/gorse-in-one
+COPY --from=0 /usr/bin/gorse-optimize /usr/bin/gorse-optimize
+
+ENV USER=root
+
+ENTRYPOINT ["/usr/bin/gorse-in-one", "-c", "/etc/gorse/config.toml"]

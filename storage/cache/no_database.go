@@ -53,6 +53,14 @@ func (NoDatabase) Get(_ context.Context, _ string) *ReturnValue {
 	return &ReturnValue{err: ErrNoDatabase, exists: false}
 }
 
+func (NoDatabase) GetValues(_ context.Context, names ...string) []*ReturnValue {
+	values := make([]*ReturnValue, len(names))
+	for i := range names {
+		values[i] = &ReturnValue{err: ErrNoDatabase, exists: false}
+	}
+	return values
+}
+
 // Delete method of NoDatabase returns ErrNoDatabase.
 func (NoDatabase) Delete(_ context.Context, _ string) error {
 	return ErrNoDatabase

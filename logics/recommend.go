@@ -22,6 +22,7 @@ import (
 	mapset "github.com/deckarep/golang-set/v2"
 	"github.com/gorse-io/gorse/common/expression"
 	"github.com/gorse-io/gorse/common/heap"
+	"github.com/gorse-io/gorse/common/parallel"
 	"github.com/gorse-io/gorse/common/util"
 	"github.com/gorse-io/gorse/config"
 	"github.com/gorse-io/gorse/storage/cache"
@@ -50,11 +51,12 @@ type Recommender struct {
 	userFeedback []data.Feedback
 	categories   []string
 	excludeSet   mapset.Set[string]
+	latestItems  []data.Item
 }
 
 type RecommenderFunc func(ctx context.Context) ([]cache.Score, string, error)
 
-func NewRecommender(config config.RecommendConfig, cacheClient cache.Database, dataClient data.Database, online bool, userId string, categories []string) (*Recommender, error) {
+func NewRecommender(config config.RecommendConfig, cacheClient cache.Database, dataClient data.Database, online bool, userId string, categories []string, latestItems []data.Item) (*Recommender, error) {
 	// Load user feedback
 	userFeedback, err := dataClient.GetUserFeedback(context.Background(), userId, lo.ToPtr(time.Now()))
 	if err != nil {
@@ -80,6 +82,7 @@ func NewRecommender(config config.RecommendConfig, cacheClient cache.Database, d
 		coldstart:    coldstart,
 		categories:   categories,
 		excludeSet:   excludeSet,
+		latestItems:  latestItems,
 	}, nil
 }
 
@@ -169,9 +172,15 @@ func (r *Recommender) parse(fullname string) (RecommenderFunc, error) {
 }
 
 func (r *Recommender) recommendLatest(ctx context.Context) ([]cache.Score, string, error) {
-	items, err := r.dataClient.GetLatestItems(ctx, r.config.CacheSize, r.categories)
-	if err != nil {
-		return nil, "", errors.Trace(err)
+	var items []data.Item
+	if r.latestItems != nil && len(r.categories) == 0 {
+		items = r.latestItems
+	} else {
+		var err error
+		items, err = r.dataClient.GetLatestItems(ctx, r.config.CacheSize, r.categories)
+		if err != nil {
+			return nil, "", errors.Trace(err)
+		}
 	}
 	scores := make([]cache.Score, 0, len(items))
 	for _, item := range items {
@@ -241,24 +250,42 @@ func (r *Recommender) recommendItemToItem(name string) RecommenderFunc {
 				userFeedback = append(userFeedback, feedback)
 			}
 		}
+		digestKeys := lo.Map(userFeedback, func(feedback data.Feedback, _ int) string {
+			return cache.Key(cache.ItemToItemDigest, name, feedback.ItemId)
+		})
+		digestValues := r.cacheClient.GetValues(ctx, digestKeys...)
+		type itemToItemResult struct {
+			similarItems []cache.Score
+			digest       string
+		}
+		itemToItemResults := make([]itemToItemResult, len(userFeedback))
+		if err := parallel.Parallel(ctx, len(userFeedback), min(len(userFeedback), 8), func(_, jobId int) error {
+			similarItems, err := r.cacheClient.SearchScores(ctx, cache.ItemToItem, cache.Key(name, userFeedback[jobId].ItemId), r.categories, 0, r.config.CacheSize)
+			if err != nil {
+				return errors.Trace(err)
+			}
+			digest, err := digestValues[jobId].String()
+			if err != nil {
+				return errors.Trace(err)
+			}
+			itemToItemResults[jobId] = itemToItemResult{
+				similarItems: similarItems,
+				digest:       digest,
+			}
+			return nil
+		}); err != nil {
+			return nil, "", errors.Trace(err)
+		}
 		// collect scores
 		scores := make(map[string]float64)
 		categories := make(map[string][]string)
 		digests := mapset.NewSet[string]()
-		for _, feedback := range userFeedback {
-			similarItems, err := r.cacheClient.SearchScores(ctx, cache.ItemToItem, cache.Key(name, feedback.ItemId), r.categories, 0, r.config.CacheSize)
-			if err != nil {
-				return nil, "", errors.Trace(err)
-			}
-			digest, err := r.cacheClient.Get(ctx, cache.Key(cache.ItemToItemDigest, name, feedback.ItemId)).String()
-			if err != nil {
-				return nil, "", errors.Trace(err)
-			}
-			for _, item := range similarItems {
+		for _, result := range itemToItemResults {
+			for _, item := range result.similarItems {
 				if !r.excludeSet.Contains(item.Id) {
 					scores[item.Id] += item.Score
 					categories[item.Id] = item.Categories
-					digests.Add(digest)
+					digests.Add(result.digest)
 				}
 			}
 		}
@@ -291,17 +318,24 @@ func (r *Recommender) recommendUserToUser(name string) RecommenderFunc {
 		if err != nil {
 			return nil, "", errors.Trace(err)
 		}
-		// aggregate scores
-		for _, user := range similarUsers {
-			// load historical feedback
-			feedbacks, err := r.dataClient.GetUserFeedback(ctx, user.Id, lo.ToPtr(time.Now()), r.config.DataSource.PositiveFeedbackTypes...)
+		// Fetch all similar users' feedback concurrently (capped to avoid saturating the DB pool
+		// when the outer pipeline already runs p.Jobs concurrent users).
+		userFeedbacks := make([][]data.Feedback, len(similarUsers))
+		if err := parallel.Parallel(ctx, len(similarUsers), min(len(similarUsers), 8), func(_, jobId int) error {
+			feedbacks, err := r.dataClient.GetUserFeedback(ctx, similarUsers[jobId].Id, lo.ToPtr(time.Now()), r.config.DataSource.PositiveFeedbackTypes...)
 			if err != nil {
-				return nil, "", errors.Trace(err)
+				return errors.Trace(err)
 			}
-			// add unseen items
+			userFeedbacks[jobId] = feedbacks
+			return nil
+		}); err != nil {
+			return nil, "", errors.Trace(err)
+		}
+		// aggregate scores
+		for i, feedbacks := range userFeedbacks {
 			for _, feedback := range feedbacks {
 				if !r.excludeSet.Contains(feedback.ItemId) {
-					scores[feedback.ItemId] += user.Score
+					scores[feedback.ItemId] += similarUsers[i].Score
 				}
 			}
 		}

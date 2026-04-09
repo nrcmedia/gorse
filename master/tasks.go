@@ -19,7 +19,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/c-bata/goptuna"
@@ -429,13 +428,30 @@ func (m *Master) LoadDataFromDatabase(
 	itemGroups := parallel.Split(items, m.Config.Master.NumJobs)
 
 	// STEP 3: pull positive feedback
-	var mu sync.Mutex
+	type feedbackEntry struct {
+		userIndex    int32
+		itemIndex    int32
+		userId       string
+		itemId       string
+		feedbackType string
+		value        float64
+		timestamp    time.Time
+	}
 	var posFeedbackCount int
 	start = time.Now()
+	allPosEntries := make([][]feedbackEntry, len(itemGroups))
+	posSpanCounts := make([]int, len(itemGroups))
 	err = parallel.Parallel(newCtx, len(itemGroups), m.Config.Master.NumJobs, func(_, i int) error {
+		var localEntries []feedbackEntry
+		var localSpanCount int
 		var itemFeedback []data.Feedback
 		var itemGroupIndex int
 		itemHasFeedback := make([]bool, len(itemGroups[i]))
+		// build item ID to index map for O(1) lookup
+		itemIdToIndex := make(map[string]int, len(itemGroups[i]))
+		for idx, item := range itemGroups[i] {
+			itemIdToIndex[item.ItemId] = idx
+		}
 		feedbackChan, errChan := database.GetFeedbackStream(newCtx, batchSize,
 			data.WithBeginItemId(itemGroups[i][0].ItemId),
 			data.WithEndItemId(itemGroups[i][len(itemGroups[i])-1].ItemId),
@@ -454,14 +470,12 @@ func (m *Master) LoadDataFromDatabase(
 				if itemIndex == dataset.NotId {
 					continue
 				}
-				// insert feedback to positive set
-				positiveSet[userIndex].Add(itemIndex)
-
-				mu.Lock()
-				posFeedbackCount++
-				// insert feedback to evaluator
-				evaluator.Add(f.FeedbackType, f.Value, userIndex, itemIndex, f.Timestamp)
-				mu.Unlock()
+				// collect for sequential merge
+				localEntries = append(localEntries, feedbackEntry{
+					userIndex: userIndex, itemIndex: itemIndex,
+					userId: f.UserId, itemId: f.ItemId,
+					feedbackType: f.FeedbackType, value: f.Value, timestamp: f.Timestamp,
+				})
 
 				// append item feedback
 				if len(itemFeedback) == 0 || itemFeedback[len(itemFeedback)-1].ItemId == f.ItemId {
@@ -476,14 +490,9 @@ func (m *Master) LoadDataFromDatabase(
 					itemFeedback = append(itemFeedback, f)
 				}
 				// find item group index
-				for itemGroupIndex = 0; itemGroupIndex < len(itemGroups[i]); itemGroupIndex++ {
-					if itemGroups[i][itemGroupIndex].ItemId == f.ItemId {
-						break
-					}
-				}
-				dataSet.AddFeedback(f.UserId, f.ItemId, f.Timestamp)
+				itemGroupIndex = itemIdToIndex[f.ItemId]
 			}
-			span.Add(len(feedback))
+			localSpanCount += len(feedback)
 		}
 
 		// add item to non-personalized recommenders
@@ -500,13 +509,27 @@ func (m *Master) LoadDataFromDatabase(
 				}
 			}
 		}
-		if err = <-errChan; err != nil {
-			return errors.Trace(err)
+		if streamErr := <-errChan; streamErr != nil {
+			return errors.Trace(streamErr)
 		}
+		allPosEntries[i] = localEntries  // safe: each goroutine owns a distinct index
+		posSpanCounts[i] = localSpanCount
 		return nil
 	})
 	if err != nil {
 		return nil, nil, errors.Trace(err)
+	}
+	// merge positive feedback entries sequentially
+	for _, c := range posSpanCounts {
+		span.Add(c)
+	}
+	for _, entries := range allPosEntries {
+		for _, e := range entries {
+			positiveSet[e.userIndex].Add(e.itemIndex)
+			evaluator.Add(e.feedbackType, e.value, e.userIndex, e.itemIndex, e.timestamp)
+			dataSet.AddFeedback(e.userId, e.itemId, e.timestamp)
+			posFeedbackCount++
+		}
 	}
 	log.Logger().Debug("pulled positive feedback from database",
 		zap.Int("n_positive_feedback", posFeedbackCount),
@@ -521,8 +544,12 @@ func (m *Master) LoadDataFromDatabase(
 
 	// STEP 4: pull negative feedback
 	start = time.Now()
-	var negativeFeedbackCount float64
+	var negativeFeedbackCount int
+	allNegEntries := make([][]feedbackEntry, len(itemGroups))
+	negSpanCounts := make([]int, len(itemGroups))
 	err = parallel.Parallel(newCtx, len(itemGroups), m.Config.Master.NumJobs, func(_, i int) error {
+		var localEntries []feedbackEntry
+		var localSpanCount int
 		feedbackChan, errChan := database.GetFeedbackStream(newCtx, batchSize,
 			data.WithBeginItemId(itemGroups[i][0].ItemId),
 			data.WithEndItemId(itemGroups[i][len(itemGroups[i])-1].ItemId),
@@ -539,24 +566,36 @@ func (m *Master) LoadDataFromDatabase(
 				if itemIndex == dataset.NotId {
 					continue
 				}
-				negativeSet[userIndex].Add(itemIndex)
-				mu.Lock()
-				negativeFeedbackCount++
-				evaluator.Add(f.FeedbackType, f.Value, userIndex, itemIndex, f.Timestamp)
-				mu.Unlock()
+				localEntries = append(localEntries, feedbackEntry{
+					userIndex: userIndex, itemIndex: itemIndex,
+					feedbackType: f.FeedbackType, value: f.Value, timestamp: f.Timestamp,
+				})
 			}
-			span.Add(len(feedback))
+			localSpanCount += len(feedback)
 		}
-		if err = <-errChan; err != nil {
-			return errors.Trace(err)
+		if streamErr := <-errChan; streamErr != nil {
+			return errors.Trace(streamErr)
 		}
+		allNegEntries[i] = localEntries  // safe: each goroutine owns a distinct index
+		negSpanCounts[i] = localSpanCount
 		return nil
 	})
 	if err != nil {
 		return nil, nil, errors.Trace(err)
 	}
+	// merge negative feedback entries sequentially
+	for _, c := range negSpanCounts {
+		span.Add(c)
+	}
+	for _, entries := range allNegEntries {
+		for _, e := range entries {
+			negativeSet[e.userIndex].Add(e.itemIndex)
+			evaluator.Add(e.feedbackType, e.value, e.userIndex, e.itemIndex, e.timestamp)
+			negativeFeedbackCount++
+		}
+	}
 	log.Logger().Debug("pulled negative feedback from database",
-		zap.Int("n_negative_feedback", int(negativeFeedbackCount)),
+		zap.Int("n_negative_feedback", negativeFeedbackCount),
 		zap.Duration("used_time", time.Since(start)))
 	LoadDatasetStepSecondsVec.WithLabelValues("load_negative_feedback").Set(time.Since(start).Seconds())
 
@@ -1023,6 +1062,10 @@ func (m *Master) trainClickThroughRatePrediction(parent context.Context, trainSe
 			zap.Float32("Recall", m.clickThroughRateTarget.Score.Recall),
 			zap.Any("params", clickThroughRateParams))
 	}
+	if _, hasEpochs := clickThroughRateParams[model.NEpochs]; !hasEpochs {
+		clickThroughRateParams = clickThroughRateParams.Copy()
+		clickThroughRateParams[model.NEpochs] = m.Config.Recommend.Ranker.FitEpoch
+	}
 	clickModel := ctr.NewAFM(clickThroughRateParams)
 	m.clickThroughRateModelMutex.Unlock()
 
@@ -1030,6 +1073,7 @@ func (m *Master) trainClickThroughRatePrediction(parent context.Context, trainSe
 	score := clickModel.Fit(ctx, trainSet, testSet,
 		ctr.NewFitConfig().
 			SetJobs(m.Config.Master.NumJobs).
+			SetVerbose(m.Config.Recommend.Ranker.FitVerbose).
 			SetPatience(m.Config.Recommend.Ranker.EarlyStopping.Patience))
 	RankingFitSeconds.Set(time.Since(startFitTime).Seconds())
 
