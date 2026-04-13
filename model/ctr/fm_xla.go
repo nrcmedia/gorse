@@ -235,7 +235,14 @@ func (fm *AFM) BatchInternalPredict(x []lo.Tuple2[[]int32, []float32], e [][][]f
 
 		for i := 0; i < batchSize; i++ {
 			row := x[start+i]
+			// Truncate features beyond numDimension. At prediction time, a sample can
+			// have more features than any training sample (e.g. a candidate item with
+			// more labels). These extra features have learned weights but were never
+			// seen together in training, so dropping them is safe.
 			for j := 0; j < len(row.A); j++ {
+				if j >= fm.numDimension {
+					break
+				}
 				indicesData[i*fm.numDimension+j] = row.A[j]
 				valuesData[i*fm.numDimension+j] = row.B[j]
 			}

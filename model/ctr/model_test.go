@@ -16,6 +16,7 @@ package ctr
 import (
 	"bytes"
 	"context"
+	"math"
 	"runtime"
 	"testing"
 
@@ -226,4 +227,58 @@ func TestFactorizationMachines_Classification_Synthesis(t *testing.T) {
 		},
 		fitConfig.Jobs,
 	), 4)
+}
+
+func TestAFM_PredictExceedsNumDimension(t *testing.T) {
+	// Build a dataset where training samples have few labels.
+	// numDimension will be 4: 1 (user) + 1 (item) + 1 (user label) + 1 (item label).
+	builder := dataset.NewUnifiedMapIndexBuilder()
+	builder.AddUser("u0")
+	builder.AddUser("u1")
+	builder.AddUserLabel("ul0")
+	builder.AddUserLabel("ul1")
+	builder.AddUserLabel("ul2")
+	builder.AddItem("i0")
+	builder.AddItem("i1")
+	builder.AddItemLabel("il0")
+	builder.AddItemLabel("il1")
+	builder.AddItemLabel("il2")
+
+	dataSet := NewMapIndexDataset()
+	dataSet.Index = builder.Build()
+	// Each user and item has only 1 label during training.
+	dataSet.UserLabels = [][]lo.Tuple2[int32, float32]{
+		{{A: 0, B: 1.0}}, // u0: 1 label
+		{{A: 1, B: 1.0}}, // u1: 1 label
+	}
+	dataSet.ItemLabels = [][]lo.Tuple2[int32, float32]{
+		{{A: 0, B: 1.0}}, // i0: 1 label
+		{{A: 1, B: 1.0}}, // i1: 1 label
+	}
+	dataSet.Users = []int32{0, 0, 1, 1}
+	dataSet.Items = []int32{0, 1, 0, 1}
+	dataSet.Target = []float32{1, -1, -1, 1}
+	dataSet.PositiveCount = 2
+	dataSet.NegativeCount = 2
+
+	m := NewAFM(model.Params{model.NEpochs: 1})
+	m.Fit(context.Background(), dataSet, dataSet, newFitConfigWithTestTracker())
+	assert.Equal(t, 4, m.numDimension)
+
+	// Predict with a sample that has 3 user labels + 3 item labels → 8 features,
+	// which exceeds numDimension (4). Before the fix this panics.
+	result := m.BatchPredict(
+		[]lo.Tuple4[string, string, []Label, []Label]{
+			{
+				A: "u0",
+				B: "i0",
+				C: []Label{{Name: "ul0", Value: 1.0}, {Name: "ul1", Value: 0.5}, {Name: "ul2", Value: -1.0}},
+				D: []Label{{Name: "il0", Value: 1.0}, {Name: "il1", Value: 0.5}, {Name: "il2", Value: -1.0}},
+			},
+		},
+		[][]Embedding{{}},
+		1,
+	)
+	assert.Len(t, result, 1)
+	assert.False(t, math.IsNaN(float64(result[0])))
 }

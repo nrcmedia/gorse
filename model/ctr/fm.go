@@ -431,7 +431,14 @@ func (fm *AFM) convertToTensors(x []lo.Tuple2[[]int32, []float32], e [][][]float
 		if len(x[i].A) != len(x[i].B) {
 			panic("length of indices and values must be equal")
 		}
+		// Truncate features beyond numDimension. At prediction time, a sample can
+		// have more features than any training sample (e.g. a candidate item with
+		// more labels). These extra features have learned weights but were never
+		// seen together in training, so dropping them is safe.
 		for j := range x[i].A {
+			if j >= fm.numDimension {
+				break
+			}
 			alignedIndices[i*fm.numDimension+j] = float32(x[i].A[j])
 			alignedValues[i*fm.numDimension+j] = x[i].B[j]
 		}
