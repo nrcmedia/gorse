@@ -235,10 +235,8 @@ func (fm *AFM) BatchInternalPredict(x []lo.Tuple2[[]int32, []float32], e [][][]f
 
 		for i := 0; i < batchSize; i++ {
 			row := x[start+i]
-			// Truncate features beyond numDimension. At prediction time, a sample can
-			// have more features than any training sample (e.g. a candidate item with
-			// more labels). These extra features have learned weights but were never
-			// seen together in training, so dropping them is safe.
+			// Safety net for models deserialized with an older, narrower numDimension:
+			// truncate features that exceed the tensor width.
 			for j := 0; j < len(row.A); j++ {
 				if j >= fm.numDimension {
 					break
@@ -321,11 +319,11 @@ func (fm *AFM) BatchPredict(inputs []lo.Tuple4[string, string, []Label, []Label]
 
 func (fm *AFM) Init(trainSet dataset.CTRSplit) {
 	fm.numFeatures = int(trainSet.GetIndex().Len())
-	fm.numDimension = 0
-	for i := 0; i < trainSet.Count(); i++ {
-		_, x, _, _ := trainSet.Get(i)
-		fm.numDimension = mathutil.MaxVal(fm.numDimension, len(x))
-	}
+	// numDimension is the maximum number of features per sample in the tensor layout.
+	// Use the full feature space width (user + item + all label types) so that prediction-
+	// time samples with more labels than any training sample still fit without truncation.
+	index := trainSet.GetIndex()
+	fm.numDimension = 2 + int(index.CountUserLabels()) + int(index.CountItemLabels()) + int(index.CountContextLabels())
 	fm.embeddingDim = trainSet.GetItemEmbeddingDim()
 	fm.embeddingIndex = trainSet.GetItemEmbeddingIndex()
 

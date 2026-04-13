@@ -229,9 +229,9 @@ func TestFactorizationMachines_Classification_Synthesis(t *testing.T) {
 	), 4)
 }
 
-func TestAFM_PredictExceedsNumDimension(t *testing.T) {
-	// Build a dataset where training samples have few labels.
-	// numDimension will be 4: 1 (user) + 1 (item) + 1 (user label) + 1 (item label).
+func TestAFM_PredictExceedsTrainingDimension(t *testing.T) {
+	// Training samples have 1 label per user/item, but the index knows 3 of each.
+	// numDimension should be 2 + 3 + 3 = 8 (full feature space), not 4 (training max).
 	builder := dataset.NewUnifiedMapIndexBuilder()
 	builder.AddUser("u0")
 	builder.AddUser("u1")
@@ -263,22 +263,35 @@ func TestAFM_PredictExceedsNumDimension(t *testing.T) {
 
 	m := NewAFM(model.Params{model.NEpochs: 1})
 	m.Fit(context.Background(), dataSet, dataSet, newFitConfigWithTestTracker())
-	assert.Equal(t, 4, m.numDimension)
+	assert.Equal(t, 8, m.numDimension, "numDimension should cover the full feature space")
 
-	// Predict with a sample that has 3 user labels + 3 item labels → 8 features,
-	// which exceeds numDimension (4). Before the fix this panics.
-	result := m.BatchPredict(
+	// Predict with all 3 user labels + 3 item labels (8 features total).
+	// With the old training-max numDimension (4), this would panic or truncate.
+	userLabels := []Label{{Name: "ul0", Value: 1.0}, {Name: "ul1", Value: 0.5}, {Name: "ul2", Value: -1.0}}
+	itemLabels := []Label{{Name: "il0", Value: 1.0}, {Name: "il1", Value: 0.5}, {Name: "il2", Value: -1.0}}
+	batchResult := m.BatchPredict(
 		[]lo.Tuple4[string, string, []Label, []Label]{
-			{
-				A: "u0",
-				B: "i0",
-				C: []Label{{Name: "ul0", Value: 1.0}, {Name: "ul1", Value: 0.5}, {Name: "ul2", Value: -1.0}},
-				D: []Label{{Name: "il0", Value: 1.0}, {Name: "il1", Value: 0.5}, {Name: "il2", Value: -1.0}},
-			},
+			{A: "u0", B: "i0", C: userLabels, D: itemLabels},
 		},
 		[][]Embedding{{}},
 		1,
 	)
-	assert.Len(t, result, 1)
-	assert.False(t, math.IsNaN(float64(result[0])))
+	assert.Len(t, batchResult, 1)
+	assert.False(t, math.IsNaN(float64(batchResult[0])))
+
+	// Verify BatchPredict and BatchInternalPredict agree — all features are
+	// included, none silently dropped.
+	idx := dataSet.Index
+	internalX := lo.Tuple2[[]int32, []float32]{
+		A: []int32{idx.EncodeUser("u0"), idx.EncodeItem("i0"),
+			idx.EncodeUserLabel("ul0"), idx.EncodeUserLabel("ul1"), idx.EncodeUserLabel("ul2"),
+			idx.EncodeItemLabel("il0"), idx.EncodeItemLabel("il1"), idx.EncodeItemLabel("il2")},
+		B: []float32{1, 1, 1.0, 0.5, -1.0, 1.0, 0.5, -1.0},
+	}
+	internalResult := m.BatchInternalPredict(
+		[]lo.Tuple2[[]int32, []float32]{internalX},
+		[][][]float32{nil},
+		1,
+	)
+	assert.Equal(t, batchResult, internalResult)
 }
