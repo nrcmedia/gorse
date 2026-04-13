@@ -320,10 +320,17 @@ func (fm *AFM) BatchPredict(inputs []lo.Tuple4[string, string, []Label, []Label]
 func (fm *AFM) Init(trainSet dataset.CTRSplit) {
 	fm.numFeatures = int(trainSet.GetIndex().Len())
 	// numDimension is the maximum number of features per sample in the tensor layout.
-	// Use the full feature space width (user + item + all label types) so that prediction-
-	// time samples with more labels than any training sample still fit without truncation.
+	// Take the max of the training-sample scan (needed for UnifiedDirectIndex / libFM
+	// datasets where Count*Labels are synthetic partitions) and the feature-space width
+	// (needed for UnifiedMapIndex where prediction-time samples can have more labels
+	// than any training sample).
+	fm.numDimension = 0
+	for i := 0; i < trainSet.Count(); i++ {
+		_, x, _, _ := trainSet.Get(i)
+		fm.numDimension = max(fm.numDimension, len(x))
+	}
 	index := trainSet.GetIndex()
-	fm.numDimension = 2 + int(index.CountUserLabels()) + int(index.CountItemLabels()) + int(index.CountContextLabels())
+	fm.numDimension = max(fm.numDimension, 2+int(index.CountUserLabels())+int(index.CountItemLabels())+int(index.CountContextLabels()))
 	fm.embeddingDim = trainSet.GetItemEmbeddingDim()
 	fm.embeddingIndex = trainSet.GetItemEmbeddingIndex()
 
