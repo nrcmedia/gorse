@@ -230,8 +230,8 @@ func TestFactorizationMachines_Classification_Synthesis(t *testing.T) {
 }
 
 func TestAFM_PredictExceedsTrainingDimension(t *testing.T) {
-	// Training samples have 1 label per user/item, but the index knows 3 of each.
-	// numDimension should be 2 + 3 + 3 = 8 (full feature space), not 4 (training max).
+	// Training samples have 1 label per user/item, but prediction uses 3 of each.
+	// Training should keep the narrow training width; prediction should widen safely.
 	builder := dataset.NewUnifiedMapIndexBuilder()
 	builder.AddUser("u0")
 	builder.AddUser("u1")
@@ -263,7 +263,7 @@ func TestAFM_PredictExceedsTrainingDimension(t *testing.T) {
 
 	m := NewAFM(model.Params{model.NEpochs: 1})
 	m.Fit(context.Background(), dataSet, dataSet, newFitConfigWithTestTracker())
-	assert.Equal(t, 8, m.numDimension, "numDimension should cover the full feature space")
+	assert.Equal(t, 4, m.numDimension, "training numDimension should stay at the training-sample max")
 
 	// Predict with all 3 user labels + 3 item labels (8 features total).
 	// With the old training-max numDimension (4), this would panic or truncate.
