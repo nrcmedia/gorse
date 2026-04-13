@@ -111,6 +111,21 @@ func (b *BaseFactorizationMachines) Init(trainSet dataset.CTRSplit) {
 	b.Index = trainSet.GetIndex()
 }
 
+// computeNumDimension returns the maximum number of features per sample for tensor layout.
+// Takes the max of the training-sample scan (correct for UnifiedDirectIndex / libFM datasets
+// where Count*Labels are synthetic partitions) and the feature-space width (correct for
+// UnifiedMapIndex where prediction-time samples can have more labels than any training sample).
+func computeNumDimension(trainSet dataset.CTRSplit) int {
+	numDimension := 0
+	for i := 0; i < trainSet.Count(); i++ {
+		_, x, _, _ := trainSet.Get(i)
+		numDimension = max(numDimension, len(x))
+	}
+	index := trainSet.GetIndex()
+	numDimension = max(numDimension, 2+int(index.CountUserLabels())+int(index.CountItemLabels())+int(index.CountContextLabels()))
+	return numDimension
+}
+
 func MarshalModel(w io.Writer, m FactorizationMachines) error {
 	// write header
 	var err error
