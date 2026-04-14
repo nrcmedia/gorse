@@ -148,16 +148,14 @@ func (fm *AFM) InternalPredict(_ []int32, _ []float32) float32 {
 func (fm *AFM) BatchInternalPredict(x []lo.Tuple2[[]int32, []float32], e [][][]float32, jobs int) []float32 {
 	fm.mu.RLock()
 	defer fm.mu.RUnlock()
-	numDimension := computeBatchNumDimension(fm.numDimension, x)
-	indicesTensor, valuesTensor, embeddingTensor, _ := fm.convertToTensors(x, e, nil, numDimension)
 	predictions := make([]float32, 0, len(x))
 	for i := 0; i < len(x); i += fm.batchSize {
 		j := mathutil.Min(i+fm.batchSize, len(x))
-		embeddingTensorSlice := make([]*nn.Tensor, len(fm.embeddingDim))
-		for k := range fm.embeddingDim {
-			embeddingTensorSlice[k] = embeddingTensor[k].Slice(i, j)
-		}
-		output := fm.Forward(indicesTensor.Slice(i, j), valuesTensor.Slice(i, j), embeddingTensorSlice, jobs)
+		// Keep widening local to each mini-batch so a single wide sample
+		// doesn't inflate tensor width for the entire inference set.
+		numDimension := computeBatchNumDimension(fm.numDimension, x[i:j])
+		indicesTensor, valuesTensor, embeddingTensor, _ := fm.convertToTensors(x[i:j], e[i:j], nil, numDimension)
+		output := fm.Forward(indicesTensor, valuesTensor, embeddingTensor, jobs)
 		predictions = append(predictions, output.Data()...)
 	}
 	return predictions[:len(x)]

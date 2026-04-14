@@ -220,13 +220,15 @@ func (fm *AFM) BatchInternalPredict(x []lo.Tuple2[[]int32, []float32], e [][][]f
 
 	// Prepare data
 	numBatches := (len(x) + fm.batchSize - 1) / fm.batchSize
+	// Keep input width stable within this call to avoid frequent recompilation
+	// on backends that key execution by input shape.
+	numDimension := computeBatchNumDimension(fm.numDimension, x)
 	predictions := make([]float32, 0, len(x))
 
 	for b := 0; b < numBatches; b++ {
 		start := b * fm.batchSize
 		end := mathutil.Min(start+fm.batchSize, len(x))
 		batchSize := end - start
-		numDimension := computeBatchNumDimension(fm.numDimension, x[start:end])
 
 		indicesData := make([]int32, batchSize*numDimension)
 		valuesData := make([]float32, batchSize*numDimension)
