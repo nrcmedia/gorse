@@ -146,13 +146,14 @@ func (fm *AFM) forwardGraph(ctx *mlx_context.Context, indices, values *graph.Nod
 	ctx = ctx.Checked(false)
 	g := indices.Graph()
 	batchSize := indices.Shape().Dimensions[0]
+	numDimension := indices.Shape().Dimensions[1]
 
 	// V: Embedding(numFeatures, nFactors)
 	vCtx := ctx.In("V")
 	v := layers.Embedding(vCtx, indices, dtypes.F32, fm.numFeatures, fm.nFactors) // [batchSize, numDimension, nFactors]
 
 	// x: values [batchSize, numDimension, 1]
-	x := graph.Reshape(values, batchSize, fm.numDimension, 1)
+	x := graph.Reshape(values, batchSize, numDimension, 1)
 
 	// vx: BMM(v, x, true, false) -> [batchSize, nFactors, 1]
 	// contracting axes: [1] (numDimension), batch axes: [0]
@@ -219,6 +220,9 @@ func (fm *AFM) BatchInternalPredict(x []lo.Tuple2[[]int32, []float32], e [][][]f
 
 	// Prepare data
 	numBatches := (len(x) + fm.batchSize - 1) / fm.batchSize
+	// Keep input width stable within this call to avoid frequent recompilation
+	// on backends that key execution by input shape.
+	numDimension := computeBatchNumDimension(fm.numDimension, x)
 	predictions := make([]float32, 0, len(x))
 
 	for b := 0; b < numBatches; b++ {
@@ -226,8 +230,8 @@ func (fm *AFM) BatchInternalPredict(x []lo.Tuple2[[]int32, []float32], e [][][]f
 		end := mathutil.Min(start+fm.batchSize, len(x))
 		batchSize := end - start
 
-		indicesData := make([]int32, batchSize*fm.numDimension)
-		valuesData := make([]float32, batchSize*fm.numDimension)
+		indicesData := make([]int32, batchSize*numDimension)
+		valuesData := make([]float32, batchSize*numDimension)
 		additionalData := make([][]float32, len(fm.embeddingDim))
 		for i := range additionalData {
 			additionalData[i] = make([]float32, batchSize*fm.embeddingDim[i])
@@ -235,9 +239,12 @@ func (fm *AFM) BatchInternalPredict(x []lo.Tuple2[[]int32, []float32], e [][][]f
 
 		for i := 0; i < batchSize; i++ {
 			row := x[start+i]
-			for j := 0; j < len(row.A); j++ {
-				indicesData[i*fm.numDimension+j] = row.A[j]
-				valuesData[i*fm.numDimension+j] = row.B[j]
+			// Clamp to numDimension: deserialized models may have a narrower
+			// numDimension than the current feature space.
+			n := min(len(row.A), numDimension)
+			for j := 0; j < n; j++ {
+				indicesData[i*numDimension+j] = row.A[j]
+				valuesData[i*numDimension+j] = row.B[j]
 			}
 			for j := range fm.embeddingDim {
 				if len(e[start+i]) > j && len(e[start+i][j]) == fm.embeddingDim[j] {
@@ -247,8 +254,8 @@ func (fm *AFM) BatchInternalPredict(x []lo.Tuple2[[]int32, []float32], e [][][]f
 		}
 
 		inputs := []any{
-			tensors.FromFlatDataAndDimensions(indicesData, batchSize, fm.numDimension),
-			tensors.FromFlatDataAndDimensions(valuesData, batchSize, fm.numDimension),
+			tensors.FromFlatDataAndDimensions(indicesData, batchSize, numDimension),
+			tensors.FromFlatDataAndDimensions(valuesData, batchSize, numDimension),
 		}
 		for i := range additionalData {
 			inputs = append(inputs, tensors.FromFlatDataAndDimensions(additionalData[i], batchSize, fm.embeddingDim[i]))
@@ -314,11 +321,7 @@ func (fm *AFM) BatchPredict(inputs []lo.Tuple4[string, string, []Label, []Label]
 
 func (fm *AFM) Init(trainSet dataset.CTRSplit) {
 	fm.numFeatures = int(trainSet.GetIndex().Len())
-	fm.numDimension = 0
-	for i := 0; i < trainSet.Count(); i++ {
-		_, x, _, _ := trainSet.Get(i)
-		fm.numDimension = mathutil.MaxVal(fm.numDimension, len(x))
-	}
+	fm.numDimension = computeNumDimension(trainSet)
 	fm.embeddingDim = trainSet.GetItemEmbeddingDim()
 	fm.embeddingIndex = trainSet.GetItemEmbeddingIndex()
 

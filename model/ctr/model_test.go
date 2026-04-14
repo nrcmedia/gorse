@@ -16,6 +16,7 @@ package ctr
 import (
 	"bytes"
 	"context"
+	"math"
 	"runtime"
 	"testing"
 
@@ -226,4 +227,71 @@ func TestFactorizationMachines_Classification_Synthesis(t *testing.T) {
 		},
 		fitConfig.Jobs,
 	), 4)
+}
+
+func TestAFM_PredictExceedsTrainingDimension(t *testing.T) {
+	// Training samples have 1 label per user/item, but prediction uses 3 of each.
+	// Training should keep the narrow training width; prediction should widen safely.
+	builder := dataset.NewUnifiedMapIndexBuilder()
+	builder.AddUser("u0")
+	builder.AddUser("u1")
+	builder.AddUserLabel("ul0")
+	builder.AddUserLabel("ul1")
+	builder.AddUserLabel("ul2")
+	builder.AddItem("i0")
+	builder.AddItem("i1")
+	builder.AddItemLabel("il0")
+	builder.AddItemLabel("il1")
+	builder.AddItemLabel("il2")
+
+	dataSet := NewMapIndexDataset()
+	dataSet.Index = builder.Build()
+	// Each user and item has only 1 label during training.
+	dataSet.UserLabels = [][]lo.Tuple2[int32, float32]{
+		{{A: 0, B: 1.0}}, // u0: 1 label
+		{{A: 1, B: 1.0}}, // u1: 1 label
+	}
+	dataSet.ItemLabels = [][]lo.Tuple2[int32, float32]{
+		{{A: 0, B: 1.0}}, // i0: 1 label
+		{{A: 1, B: 1.0}}, // i1: 1 label
+	}
+	dataSet.Users = []int32{0, 0, 1, 1}
+	dataSet.Items = []int32{0, 1, 0, 1}
+	dataSet.Target = []float32{1, -1, -1, 1}
+	dataSet.PositiveCount = 2
+	dataSet.NegativeCount = 2
+
+	m := NewAFM(model.Params{model.NEpochs: 1})
+	m.Fit(context.Background(), dataSet, dataSet, newFitConfigWithTestTracker())
+	assert.Equal(t, 4, m.numDimension, "training numDimension should stay at the training-sample max")
+
+	// Predict with all 3 user labels + 3 item labels (8 features total).
+	// With the old training-max numDimension (4), this would panic or truncate.
+	userLabels := []Label{{Name: "ul0", Value: 1.0}, {Name: "ul1", Value: 0.5}, {Name: "ul2", Value: -1.0}}
+	itemLabels := []Label{{Name: "il0", Value: 1.0}, {Name: "il1", Value: 0.5}, {Name: "il2", Value: -1.0}}
+	batchResult := m.BatchPredict(
+		[]lo.Tuple4[string, string, []Label, []Label]{
+			{A: "u0", B: "i0", C: userLabels, D: itemLabels},
+		},
+		[][]Embedding{{}},
+		1,
+	)
+	assert.Len(t, batchResult, 1)
+	assert.False(t, math.IsNaN(float64(batchResult[0])))
+
+	// Verify BatchPredict and BatchInternalPredict agree — all features are
+	// included, none silently dropped.
+	idx := dataSet.Index
+	internalX := lo.Tuple2[[]int32, []float32]{
+		A: []int32{idx.EncodeUser("u0"), idx.EncodeItem("i0"),
+			idx.EncodeUserLabel("ul0"), idx.EncodeUserLabel("ul1"), idx.EncodeUserLabel("ul2"),
+			idx.EncodeItemLabel("il0"), idx.EncodeItemLabel("il1"), idx.EncodeItemLabel("il2")},
+		B: []float32{1, 1, 1.0, 0.5, -1.0, 1.0, 0.5, -1.0},
+	}
+	internalResult := m.BatchInternalPredict(
+		[]lo.Tuple2[[]int32, []float32]{internalX},
+		[][][]float32{nil},
+		1,
+	)
+	assert.Equal(t, batchResult, internalResult)
 }

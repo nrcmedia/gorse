@@ -111,6 +111,23 @@ func (b *BaseFactorizationMachines) Init(trainSet dataset.CTRSplit) {
 	b.Index = trainSet.GetIndex()
 }
 
+func computeNumDimension(trainSet dataset.CTRSplit) int {
+	numDimension := 0
+	for i := 0; i < trainSet.Count(); i++ {
+		_, x, _, _ := trainSet.Get(i)
+		numDimension = max(numDimension, len(x))
+	}
+	return numDimension
+}
+
+func computeBatchNumDimension(base int, x []lo.Tuple2[[]int32, []float32]) int {
+	numDimension := base
+	for i := range x {
+		numDimension = max(numDimension, len(x[i].A))
+	}
+	return numDimension
+}
+
 func MarshalModel(w io.Writer, m FactorizationMachines) error {
 	// write header
 	var err error
@@ -142,4 +159,3 @@ func UnmarshalModel(r io.Reader) (FactorizationMachines, error) {
 	}
 	return nil, fmt.Errorf("unknown model: %v", header)
 }
-
